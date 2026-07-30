@@ -1,0 +1,4 @@
+D:/coding/sc++/build/CMakeFiles/pdfgen_lib.dir
+D:/coding/sc++/build/CMakeFiles/ScreenshotApp.dir
+D:/coding/sc++/build/CMakeFiles/ALL_BUILD.dir
+D:/coding/sc++/build/CMakeFiles/ZERO_CHECK.dir

@@ -1,0 +1,140 @@
+#include <windows.h>
+#include <commctrl.h>
+#include "../include/resource.h"
+
+/////////////////////////////////////////////////////////////////////////////
+// Manifest - Common Controls v6, Per-Monitor V2 DPI, Win10/11 compat GUID
+/////////////////////////////////////////////////////////////////////////////
+
+CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "manifest.xml"
+
+/////////////////////////////////////////////////////////////////////////////
+// Icons
+/////////////////////////////////////////////////////////////////////////////
+
+IDI_APP_ICON ICON "app_icon.ico"
+
+// UI icons embedded as RCDATA so the exe is self-contained (no loose
+// icons/ folder needed beside it). Decoded via GDI+ at startup.
+IDR_ICON_CHECK   RCDATA "icons/check.png"
+IDR_ICON_GEAR    RCDATA "icons/gear.png"
+IDR_ICON_CANCEL  RCDATA "icons/cancel.png"
+IDR_ICON_DELETE  RCDATA "icons/delete.png"
+IDR_ICON_REDO    RCDATA "icons/redo.png"
+
+/////////////////////////////////////////////////////////////////////////////
+// Tray menu
+/////////////////////////////////////////////////////////////////////////////
+
+IDR_TRAY_MENU MENU
+BEGIN
+    POPUP ""
+    BEGIN
+        MENUITEM "&Open ScreenshotApp",  ID_TRAY_OPEN
+        MENUITEM "New &Capture",         ID_TRAY_CAPTURE
+        MENUITEM SEPARATOR
+        MENUITEM "Stitch Images...",     ID_TRAY_STITCH
+        MENUITEM "Convert to PDF...",    ID_TRAY_PDF
+        MENUITEM SEPARATOR
+        MENUITEM "Settings",             ID_TRAY_SETTINGS
+        MENUITEM "Exit",                 ID_TRAY_EXIT
+    END
+END
+
+/////////////////////////////////////////////////////////////////////////////
+// Dialogs
+/////////////////////////////////////////////////////////////////////////////
+
+IDD_SETTINGS DIALOGEX 0, 0, 350, 250
+STYLE DS_MODALFRAME | DS_SETFONT | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Screenshot App Settings"
+FONT 9, "Segoe UI", 400, 0, 0x1
+BEGIN
+    CONTROL         "", IDC_TAB, WC_TABCONTROL, WS_TABSTOP, 8, 8, 334, 206
+    DEFPUSHBUTTON   "OK", IDOK, 232, 224, 52, 16
+    PUSHBUTTON      "Cancel", IDCANCEL, 290, 224, 52, 16
+END
+
+// Controls inside the tab pages are created programmatically by
+// SettingsDialog.cpp - a resource-defined tab child page per tab would need
+// three extra dialog templates for no benefit.
+
+IDD_STITCH DIALOGEX 0, 0, 500, 380
+STYLE DS_SETFONT | WS_OVERLAPPEDWINDOW | WS_THICKFRAME
+CAPTION "Stitch Images"
+FONT 9, "Segoe UI", 400, 0, 0x1
+BEGIN
+    CONTROL         "", IDC_IMAGE_LIST, WC_LISTVIEW,
+                    LVS_ICON | LVS_SINGLESEL | LVS_AUTOARRANGE | WS_BORDER | WS_TABSTOP,
+                    8, 8, 180, 296
+    PUSHBUTTON      "Add...", IDC_STITCH_ADD, 8, 308, 44, 14
+    PUSHBUTTON      "Remove", IDC_STITCH_REMOVE, 56, 308, 44, 14
+    PUSHBUTTON      "Up", IDC_STITCH_UP, 104, 308, 40, 14
+    PUSHBUTTON      "Down", IDC_STITCH_DOWN, 148, 308, 40, 14
+
+    CONTROL         "", IDC_PREVIEW_CANVAS, "ScreenshotAppCanvas",
+                    WS_CHILD | WS_VISIBLE | WS_HSCROLL | WS_VSCROLL | WS_BORDER | WS_TABSTOP,
+                    196, 8, 296, 238
+
+    GROUPBOX        "Direction", IDC_STATIC, 196, 252, 140, 32
+    CONTROL         "Vertical", IDC_RADIO_VERTICAL, "Button",
+                    BS_AUTORADIOBUTTON | WS_GROUP | WS_TABSTOP, 204, 266, 56, 10
+    CONTROL         "Horizontal", IDC_RADIO_HORIZONTAL, "Button",
+                    BS_AUTORADIOBUTTON, 264, 266, 66, 10
+
+    GROUPBOX        "Overlap", IDC_STATIC, 344, 252, 148, 32
+    CONTROL         "Remove overlap between images", IDC_CHECK_OVERLAP, "Button",
+                    BS_AUTOCHECKBOX | WS_GROUP | WS_TABSTOP, 352, 266, 134, 10
+
+    GROUPBOX        "Alignment && spacing", IDC_STATIC, 196, 288, 296, 32
+    CONTROL         "Left", IDC_RADIO_LEFT, "Button",
+                    BS_AUTORADIOBUTTON | WS_GROUP | WS_TABSTOP, 204, 302, 42, 10
+    CONTROL         "Center", IDC_RADIO_CENTER, "Button",
+                    BS_AUTORADIOBUTTON, 250, 302, 46, 10
+    CONTROL         "Right", IDC_RADIO_RIGHT, "Button",
+                    BS_AUTORADIOBUTTON, 300, 302, 42, 10
+    LTEXT           "Gap (px):", IDC_STATIC, 372, 303, 34, 9
+    EDITTEXT        IDC_GAP_EDIT, 408, 301, 40, 13, ES_NUMBER | WS_GROUP | WS_TABSTOP
+
+    DEFPUSHBUTTON   "Stitch && Save", IDC_STITCH_SAVE, 300, 336, 90, 16
+    PUSHBUTTON      "Copy Result", IDC_COPY_RESULT, 396, 336, 90, 16
+END
+
+IDD_PDFCONVERT DIALOGEX 0, 0, 420, 320
+STYLE DS_SETFONT | WS_OVERLAPPEDWINDOW | WS_THICKFRAME
+CAPTION "Convert to PDF"
+FONT 9, "Segoe UI", 400, 0, 0x1
+BEGIN
+    CONTROL         "", IDC_PDF_IMAGE_LIST, WC_LISTVIEW,
+                    LVS_ICON | LVS_SINGLESEL | LVS_AUTOARRANGE | WS_BORDER | WS_TABSTOP,
+                    8, 8, 150, 250
+    PUSHBUTTON      "Add...", IDC_PDF_ADD, 8, 262, 46, 14
+    PUSHBUTTON      "Remove", IDC_PDF_REMOVE, 58, 262, 46, 14
+
+    LTEXT           "Page size:", IDC_STATIC, 166, 9, 60, 9
+    CONTROL         "A4", IDC_RADIO_A4, "Button",
+                    BS_AUTORADIOBUTTON | WS_GROUP | WS_TABSTOP, 166, 21, 40, 10
+    CONTROL         "Letter", IDC_RADIO_LETTER, "Button",
+                    BS_AUTORADIOBUTTON, 210, 21, 50, 10
+
+    LTEXT           "Quality:", IDC_STATIC, 166, 37, 60, 9
+    CONTROL         "Lossless (PNG)", IDC_RADIO_PNG, "Button",
+                    BS_AUTORADIOBUTTON | WS_GROUP | WS_TABSTOP, 166, 49, 90, 10
+    CONTROL         "Compressed (JPEG)", IDC_RADIO_JPEG, "Button",
+                    BS_AUTORADIOBUTTON, 166, 61, 100, 10
+
+    LTEXT           "Layout:", IDC_STATIC, 166, 77, 60, 9
+    CONTROL         "Split into pages", IDC_RADIO_SLICE_PAGES, "Button",
+                    BS_AUTORADIOBUTTON | WS_GROUP | WS_TABSTOP, 166, 89, 110, 10
+    CONTROL         "One long page", IDC_RADIO_SLICE_LONG, "Button",
+                    BS_AUTORADIOBUTTON, 166, 101, 110, 10
+    CONTROL         "Fit on a single page", IDC_RADIO_SLICE_FIT, "Button",
+                    BS_AUTORADIOBUTTON, 280, 89, 120, 10
+
+    LTEXT           "", IDC_PDF_PAGECOUNT, 166, 117, 246, 9
+    CONTROL         "", IDC_SLICE_PREVIEW_CANVAS, "ScreenshotAppCanvas",
+                    WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL | WS_BORDER | WS_TABSTOP,
+                    166, 130, 246, 128
+
+    DEFPUSHBUTTON   "Convert && Save", IDC_PDF_CONVERT, 300, 280, 112, 16
+END

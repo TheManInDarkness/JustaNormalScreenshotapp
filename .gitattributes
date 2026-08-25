@@ -1,0 +1,22 @@
+# The tree currently has mixed CRLF and LF endings. Normalising to LF in the
+# repository (and letting Git hand Windows checkouts whatever they ask for)
+# stops the next commit from showing every line of a file as changed.
+* text=auto
+
+# Explicitly text, so a diff is always readable.
+*.cpp   text
+*.h     text
+*.c     text
+*.md    text
+*.txt   text
+*.json  text
+*.xml   text
+
+# The resource script is compiled by rc.exe; keep it CRLF, which is what the
+# Visual Studio resource editor writes if it is ever opened there.
+*.rc    text eol=crlf
+
+# Binary - never touch, never diff.
+*.png   binary
+*.ico   binary
+*.pdf   binary

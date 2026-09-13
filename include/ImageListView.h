@@ -22,6 +22,10 @@ public:
     // Decodes and adds a file. Returns its index, or -1 on failure.
     int AddFile(const std::wstring& path);
 
+    // Batch-add multiple files. Rebuilds the image list once at the end,
+    // avoiding O(n^2) thumbnail regeneration. Returns the number of files added.
+    int AddFiles(const std::vector<std::wstring>& paths);
+
     // Adds an in-memory image; the view takes ownership.
     int AddBitmap(const std::wstring& label, Gdiplus::Bitmap* owned);
 

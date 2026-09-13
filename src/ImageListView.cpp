@@ -15,7 +15,8 @@ namespace {
 // so different aspect ratios still line up in a grid.
 constexpr int kThumbBase = 72;
 
-HBITMAP RenderThumbnailTile(Bitmap* source, int size, COLORREF backdrop) {
+HBITMAP RenderThumbnailTile(Bitmap* source, int size, COLORREF backdrop,
+                            int order) {
     void* bits = nullptr;
     HBITMAP dib = Utils::CreateDIBSection32(size, size, &bits);
     if (!dib) return nullptr;
@@ -47,6 +48,41 @@ HBITMAP RenderThumbnailTile(Bitmap* source, int size, COLORREF backdrop) {
                 Pen edge(Color(90, 128, 128, 128));
                 g.DrawRectangle(&edge, (size - w) / 2, (size - h) / 2, w - 1, h - 1);
             }
+        }
+
+        // Order badge: a small circle with the 1-based position number in the
+        // top-left corner. Gives the user a visible cue for stitch order
+        // without needing to rely on selection ticks or a separate list.
+        if (order > 0) {
+            const int badgeSize = (std::max)(16, size / 4);
+            const int badgeX = 2;
+            const int badgeY = 2;
+
+            g.SetSmoothingMode(SmoothingModeAntiAlias);
+            g.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
+
+            SolidBrush bg(Color(220, 0, 120, 215));  // accent blue
+            g.FillEllipse(&bg, badgeX, badgeY, badgeSize, badgeSize);
+
+            Pen ring(Color(255, 255, 255, 255), 1.0f);
+            g.DrawEllipse(&ring, badgeX, badgeY, badgeSize, badgeSize);
+
+            wchar_t text[8];
+            _snwprintf_s(text, ARRAYSIZE(text), _TRUNCATE, L"%d", order);
+
+            FontFamily family(L"Segoe UI");
+            const REAL fontSize = static_cast<REAL>(badgeSize * 0.65);
+            Font font(&family, fontSize, FontStyleBold, UnitPixel);
+            SolidBrush textBrush(Color(255, 255, 255, 255));
+            StringFormat fmt;
+            fmt.SetAlignment(StringAlignmentCenter);
+            fmt.SetLineAlignment(StringAlignmentCenter);
+            g.DrawString(text, -1, &font,
+                         RectF(static_cast<REAL>(badgeX),
+                               static_cast<REAL>(badgeY),
+                               static_cast<REAL>(badgeSize),
+                               static_cast<REAL>(badgeSize)),
+                         &fmt, &textBrush);
         }
     }
 
@@ -102,14 +138,16 @@ void ImageListView::RebuildImageList() {
     if (!fresh) return;
 
     const COLORREF backdrop = Theme::Current().canvasBackdrop;
-    for (const auto& entry : entries_) {
-        HBITMAP tile = RenderThumbnailTile(entry->image.get(), size, backdrop);
+    for (size_t i = 0; i < entries_.size(); ++i) {
+        const int order = static_cast<int>(i + 1);  // 1-based for display
+        HBITMAP tile = RenderThumbnailTile(entries_[i]->image.get(), size,
+                                           backdrop, order);
         if (tile) {
             ImageList_Add(fresh, tile, nullptr);
             DeleteObject(tile);
         } else {
             // Keep indices aligned with entries_ even if one render failed.
-            HBITMAP blank = RenderThumbnailTile(nullptr, size, backdrop);
+            HBITMAP blank = RenderThumbnailTile(nullptr, size, backdrop, order);
             ImageList_Add(fresh, blank, nullptr);
             if (blank) DeleteObject(blank);
         }
@@ -159,6 +197,28 @@ int ImageListView::AddFile(const std::wstring& path) {
     RebuildImageList();
     RefreshItems();
     return static_cast<int>(entries_.size()) - 1;
+}
+
+int ImageListView::AddFiles(const std::vector<std::wstring>& paths) {
+    int added = 0;
+    for (const auto& path : paths) {
+        std::unique_ptr<Bitmap> image(Utils::LoadImageFromFile(path));
+        if (!image) {
+            Logger::Warnf(L"Could not load %s", path.c_str());
+            continue;
+        }
+        auto entry = std::make_unique<Entry>();
+        entry->label = Utils::GetFileNameFromPath(path);
+        entry->path = path;
+        entry->image = std::move(image);
+        entries_.push_back(std::move(entry));
+        ++added;
+    }
+    if (added > 0) {
+        RebuildImageList();
+        RefreshItems();
+    }
+    return added;
 }
 
 int ImageListView::AddBitmap(const std::wstring& label, Bitmap* owned) {

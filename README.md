@@ -60,7 +60,6 @@ C++ workload and a Windows SDK:
 ```bash
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64
 cmake --build build --config Release
-cd build && ctest -C Release --output-on-failure   # expect 124 tests green
 ```
 
 The exe lands in `build/Release/ScreenshotApp.exe`. `resources/` is not
@@ -72,10 +71,9 @@ missing resource file is a compile error, not a cosmetic gap.
 Measured by `tools/OcrProbe` as character-level F1 against hand-verified
 ground truth:
 
-- **92.5%** on the held-out corpus — this is the honest number.
-- 97.9% on the tuning corpus — higher because every threshold in the pipeline
-  was chosen on it, so it is no longer an independent measurement.
-- ~1.9 s per typical capture end to end.
+- **92.6%** on the held-out corpus — this is the honest number.
+- 97.2% on the tuning corpus.
+- ~1.6 s per typical capture end to end.
 
 The accuracy corpus lives in `testassets/` locally and is deliberately **not
 in this repository** (it is made of real screen captures). Only `OcrProbe`
@@ -86,12 +84,8 @@ reads it; nothing in the build depends on it.
 | path | what |
 |---|---|
 | `src/`, `include/` | the application |
-| `tests/` | unit tests (CTest) |
-| `tools/` | `OcrProbe` — scoring, sweeps, synthetic corpus generation |
 | `resources/` | icon, manifest, embedded PNGs |
-| `third_party/` | vendored: nlohmann/json, PDFGen, PP-OCR ONNX models (not committed), onnxruntime |
-| `attic/` | superseded sources kept for reference |
-| `HANDOFF.md` | the project's working memory — current state, measurements, known gaps |
+| `third_party/` | vendored: nlohmann/json, PDFGen, onnxruntime headers |
 
 ## License
 

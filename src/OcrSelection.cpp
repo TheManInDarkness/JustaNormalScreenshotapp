@@ -284,6 +284,14 @@ bool IsCjkText(const std::wstring& c) {
     return !c.empty() && c.front() >= 0x2E80;  // broad CJK and full-width ranges
 }
 
+// Wide characters in proportional fonts naturally span more timeline steps.
+bool IsWideGlyph(const std::wstring& c) {
+    if (c.size() != 1) return false;
+    const wchar_t ch = c[0];
+    return ch == L'm' || ch == L'M' || ch == L'w' || ch == L'W' ||
+           ch == L'@' || ch == L'%';
+}
+
 }  // namespace
 
 std::vector<WordBox> WordsFromLine(const std::vector<CharCol>& chars,
@@ -399,9 +407,14 @@ std::vector<WordBox> WordsFromLine(const std::vector<CharCol>& chars,
         bool joins = !broken && !cjk;
         if (joins && !runs.empty()) {
             const CharCol& prev = *runs.back().chars.back();
+            // Wide glyphs ('m', 'w', etc.) naturally span more timeline steps.
+            // Give wide glyphs slightly more room (2.5x) so words like "storms,"
+            // don't split into "storm s,", while standard glyphs split at 2.0x.
+            const double threshold =
+                (IsWideGlyph(prev.c) || IsWideGlyph(cc.c)) ? 2.5 : kWordGapVsAdvance;
             joins = !IsCjkText(prev.c) &&
                     (cc.col - lastCol) * pixelsPerColumn <=
-                        kWordGapVsAdvance * advancePx;
+                        threshold * advancePx;
         }
         if (joins && !runs.empty()) {
             runs.back().chars.push_back(&cc);
@@ -458,8 +471,12 @@ std::vector<WordBox> WordsFromLine(const std::vector<CharCol>& chars,
     std::vector<WordBox> words;
     for (const WordRun& run : runs) {
         const auto& cs = run.chars;
-        const double c0 = (cs.front()->col + 0.5) * pixelsPerColumn;
-        const double c1 = (cs.back()->col + 0.5) * pixelsPerColumn;
+        // The CTC decoder outputs character predictions toward the trailing
+        // half of glyph bodies. Centering on col * pixelsPerColumn rather than
+        // (col + 0.5) compensates for this lag and prevents bounding boxes from
+        // drifting to the right of words.
+        const double c0 = static_cast<double>(cs.front()->col) * pixelsPerColumn;
+        const double c1 = static_cast<double>(cs.back()->col) * pixelsPerColumn;
 
         WordBox word;
         word.text = cs.front()->c;
@@ -795,9 +812,10 @@ void SnapIndentColumns(std::vector<int>* xs, double advance) {
 }
 
 // Is this word a code gutter's line number? Digits only, and short enough to
-// be a line number rather than a value in the code itself.
+// be a line number rather than a value in the code itself. Supports files up
+// to 999,999 lines.
 bool IsGutterNumber(const std::wstring& w) {
-    if (w.empty() || w.size() > 4) return false;
+    if (w.empty() || w.size() > 6) return false;
     for (wchar_t c : w) {
         if (c < L'0' || c > L'9') return false;
     }

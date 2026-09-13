@@ -336,17 +336,20 @@ bool Detect(Engine& e, const Img& src, std::vector<Box>* boxes) {
                 resized.bgra.data() + (static_cast<size_t>(y) * rw + x) * 4;
             const size_t base = static_cast<size_t>(y) * rw + x;
             const size_t plane = static_cast<size_t>(rw) * rh;
+            const uint8_t blue = p[0];
+            const uint8_t green = p[1];
+            const uint8_t red = p[2];
+
             if (g_options.detNormalize == 1) {
                 // PaddleOCR's DetResizeForTest/NormalizeImage: ImageNet
-                // statistics, applied positionally to the BGRA channels the
-                // same way the 0.5/0.5 form below is.
-                input[base] = (p[0] / 255.0f - 0.485f) / 0.229f;
-                input[plane + base] = (p[1] / 255.0f - 0.456f) / 0.224f;
-                input[2 * plane + base] = (p[2] / 255.0f - 0.406f) / 0.225f;
+                // statistics applied in RGB channel order.
+                input[base] = (red / 255.0f - 0.485f) / 0.229f;
+                input[plane + base] = (green / 255.0f - 0.456f) / 0.224f;
+                input[2 * plane + base] = (blue / 255.0f - 0.406f) / 0.225f;
             } else {
-                input[base] = (p[0] / 255.0f - 0.5f) / 0.5f;
-                input[plane + base] = (p[1] / 255.0f - 0.5f) / 0.5f;
-                input[2 * plane + base] = (p[2] / 255.0f - 0.5f) / 0.5f;
+                input[base] = (red / 255.0f - 0.5f) / 0.5f;
+                input[plane + base] = (green / 255.0f - 0.5f) / 0.5f;
+                input[2 * plane + base] = (blue / 255.0f - 0.5f) / 0.5f;
             }
         }
     }
@@ -530,10 +533,12 @@ bool RecognizeOne(Engine& e, const Img& src, const Box& box, Line* line,
     }
 
     constexpr int kImgH = 48;
-    const double aspect = static_cast<double>(crop.w) / crop.h;
-    int resizedW = (std::max)(
-        1, (std::min)((std::max)(320, g_options.recMaxWidth),
-                      static_cast<int>(std::ceil(kImgH * aspect))));
+    const double aspect = static_cast<double>(crop.w) / (std::max)(1, crop.h);
+    const int naturalW = static_cast<int>(std::ceil(kImgH * aspect));
+    // 0 = unconstrained natural width (with an 8192 px memory guard).
+    const int maxAllowed =
+        g_options.recMaxWidth > 0 ? g_options.recMaxWidth : 8192;
+    const int resizedW = (std::max)(1, (std::min)(maxAllowed, naturalW));
     const int targetW = (std::max)(320, resizedW);
 
     const Img resized = ResizeImg(crop, resizedW, kImgH);
@@ -543,12 +548,15 @@ bool RecognizeOne(Engine& e, const Img& src, const Box& box, Line* line,
         for (int x = 0; x < resizedW; ++x) {
             const uint8_t* p =
                 resized.bgra.data() + (static_cast<size_t>(y) * resizedW + x) * 4;
+            const uint8_t blue = p[0];
+            const uint8_t green = p[1];
+            const uint8_t red = p[2];
+
             const size_t base = static_cast<size_t>(y) * targetW + x;
-            input[base] = (p[0] / 255.0f - 0.5f) / 0.5f;
-            input[static_cast<size_t>(kImgH) * targetW + base] =
-                (p[1] / 255.0f - 0.5f) / 0.5f;
-            input[2 * static_cast<size_t>(kImgH) * targetW + base] =
-                (p[2] / 255.0f - 0.5f) / 0.5f;
+            const size_t plane = static_cast<size_t>(kImgH) * targetW;
+            input[base] = (red / 255.0f - 0.5f) / 0.5f;
+            input[plane + base] = (green / 255.0f - 0.5f) / 0.5f;
+            input[2 * plane + base] = (blue / 255.0f - 0.5f) / 0.5f;
         }
     }
 

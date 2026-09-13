@@ -60,7 +60,30 @@ struct AppConfig {
 
     // Scroll capture
     int autoScrollSettleMs = 450;         // no new rows for this long = end of page
+    // When true, the idle timeout is ignored and auto-scroll only stops on
+    // the stop hotkey, the height limit, or cancellation. Useful for pages
+    // with long stretches that do not visibly change (lazy-loaded gaps,
+    // sticky sections, or a target that does not take synthetic input).
+    bool autoScrollNoIdleStop = false;
+    // When true, the hard height cap is removed entirely and auto-scroll will
+    // run until the stop hotkey, cancellation, or until the OS runs out of
+    // memory for the composite. Use with care: very long pages produce very
+    // large PNGs (tens of thousands of pixels tall).
+    bool autoScrollNoHeightLimit = false;
+    // Hard cap on composite height, in pixels. Captures that reach this are
+    // forced to stop. 0 is interpreted as "use the default" by the session
+    // code; the effective default is 60000 pixels. Ignored when
+    // autoScrollNoHeightLimit is true.
+    int autoScrollMaxRows = 60000;
     bool scrollRemoveOverlap = true;
+
+    // Stitch tool auto-load settings.
+    // When true, the stitch tool automatically loads recent captures from the
+    // save folder on open. The count is capped to avoid loading hundreds of
+    // files and the ~500MB composite that would result.
+    bool stitchAutoLoadRecent = false;
+    int stitchRecentCount = 20;         // 1..100, how many recent files to load
+
 
     // Automatic PDF for long (scroll) captures.
     bool autoPdfLongCaptures = false;

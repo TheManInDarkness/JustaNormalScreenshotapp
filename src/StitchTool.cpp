@@ -30,6 +30,9 @@ const Dpi::Anchor kAnchors[] = {
     {IDC_STITCH_REMOVE,    false, true,  false, true},
     {IDC_STITCH_UP,        false, true,  false, true},
     {IDC_STITCH_DOWN,      false, true,  false, true},
+    {IDC_CHK_AUTOLOAD_RECENT, false, true, false, true},
+    {IDC_STATIC_RECENT_COUNT, false, true, false, true},
+    {IDC_EDIT_RECENT_COUNT,   false, true, false, true},
     {IDC_PREVIEW_CANVAS,   false, false, true,  true},
     // Option groups sit above the buttons and follow the bottom edge.
     {IDC_RADIO_VERTICAL,   false, true,  false, true},
@@ -50,6 +53,7 @@ struct StitchState {
     HWND canvas = nullptr;
     UINT dpi = 96;
     bool suppressPreview = false;
+    UINT_PTR debounceTimer = 0;  // non-zero when a preview rebuild is queued
 };
 
 StitchState* GetState(HWND dlg) {
@@ -74,6 +78,54 @@ int CurrentGap(HWND dlg) {
     BOOL ok = FALSE;
     const int gap = static_cast<int>(GetDlgItemInt(dlg, IDC_GAP_EDIT, &ok, FALSE));
     return ok ? (std::max)(0, (std::min)(gap, 400)) : 0;
+}
+
+// Queues a preview rebuild 80 ms out. Rapid option changes collapse into a
+// single stitch instead of one per keystroke or radio click - the lag the
+// user reported was RebuildPreview running synchronously on every WM_COMMAND.
+// 80ms is a compromise: short enough to feel responsive, long enough to
+// collapse rapid changes (typing "10" in the gap box triggers two EN_CHANGE).
+void ScheduleRebuild(HWND dlg) {
+    StitchState* st = GetState(dlg);
+    if (!st || st->suppressPreview) return;
+    if (st->debounceTimer) KillTimer(dlg, st->debounceTimer);
+    st->debounceTimer = SetTimer(dlg, reinterpret_cast<UINT_PTR>(st), 80, nullptr);
+}
+
+// Load recent captures from the save folder into the image list.
+// Uses batch-add to avoid O(n^2) thumbnail regeneration.
+void LoadRecentCaptures(HWND dlg) {
+    StitchState* st = GetState(dlg);
+    if (!st) {
+        Logger::Warn(L"LoadRecentCaptures: no state");
+        return;
+    }
+
+    const AppConfig& cfg = Settings::Get();
+    int count = cfg.stitchRecentCount;
+    if (count < 1) count = 1;
+    if (count > 100) count = 100;
+
+    std::wstring folder = cfg.saveFolderPath;
+    if (folder.empty()) folder = AppPaths::GetDefaultSaveFolder();
+
+    Logger::Infof(L"LoadRecentCaptures: loading up to %d images from %s", count, folder.c_str());
+
+    std::vector<std::wstring> recent = Utils::ListImagesInFolder(folder);
+    Logger::Infof(L"LoadRecentCaptures: found %zu images in folder", recent.size());
+
+    if (recent.size() > static_cast<size_t>(count)) {
+        recent.resize(count);
+    }
+
+    if (!recent.empty()) {
+        st->suppressPreview = true;
+        const int added = st->images.AddFiles(recent);
+        st->suppressPreview = false;
+        Logger::Infof(L"LoadRecentCaptures: successfully added %d images", added);
+    } else {
+        Logger::Info(L"LoadRecentCaptures: no images found to load");
+    }
 }
 
 void RebuildPreview(HWND dlg) {
@@ -152,7 +204,7 @@ void AddFilesViaDialog(HWND dlg) {
     }
 
     st->suppressPreview = false;
-    RebuildPreview(dlg);
+    ScheduleRebuild(dlg);
 }
 
 void SaveResult(HWND dlg) {
@@ -215,7 +267,7 @@ void MoveSelected(HWND dlg, int delta) {
     if (!st) return;
     const int index = st->images.Selection();
     if (index < 0) return;
-    if (st->images.MoveItem(index, index + delta)) RebuildPreview(dlg);
+    if (st->images.MoveItem(index, index + delta)) ScheduleRebuild(dlg);
 }
 
 INT_PTR CALLBACK DialogProc(HWND dlg, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -255,6 +307,25 @@ INT_PTR CALLBACK DialogProc(HWND dlg, UINT msg, WPARAM wParam, LPARAM lParam) {
                 fresh->suppressPreview = false;
             }
 
+            // Restore auto-load checkbox state and cap from config.
+            const AppConfig& cfg = Settings::Get();
+            CheckDlgButton(dlg, IDC_CHK_AUTOLOAD_RECENT,
+                           cfg.stitchAutoLoadRecent ? BST_CHECKED : BST_UNCHECKED);
+            SetDlgItemInt(dlg, IDC_EDIT_RECENT_COUNT,
+                          static_cast<UINT>(cfg.stitchRecentCount), FALSE);
+
+            Logger::Infof(L"StitchTool init: autoLoadRecent=%d, initialFiles=%zu",
+                          cfg.stitchAutoLoadRecent, initial ? initial->size() : 0);
+
+            // Auto-load recent captures if the user opted in. Uses batch-add
+            // to avoid O(n^2) thumbnail regeneration during load.
+            if (cfg.stitchAutoLoadRecent && (!initial || initial->empty())) {
+                Logger::Info(L"StitchTool init: triggering auto-load");
+                LoadRecentCaptures(dlg);
+            } else {
+                Logger::Info(L"StitchTool init: skipping auto-load (disabled or initial files provided)");
+            }
+
             RebuildPreview(dlg);
             return TRUE;
         }
@@ -268,7 +339,7 @@ INT_PTR CALLBACK DialogProc(HWND dlg, UINT msg, WPARAM wParam, LPARAM lParam) {
                 case IDC_STITCH_ADD:    AddFilesViaDialog(dlg); return TRUE;
                 case IDC_STITCH_REMOVE:
                     st->images.RemoveAt(st->images.Selection());
-                    RebuildPreview(dlg);
+                    ScheduleRebuild(dlg);
                     return TRUE;
                 case IDC_STITCH_UP:     MoveSelected(dlg, -1); return TRUE;
                 case IDC_STITCH_DOWN:   MoveSelected(dlg, +1); return TRUE;
@@ -281,11 +352,43 @@ INT_PTR CALLBACK DialogProc(HWND dlg, UINT msg, WPARAM wParam, LPARAM lParam) {
                 case IDC_RADIO_LEFT:
                 case IDC_RADIO_CENTER:
                 case IDC_RADIO_RIGHT:
-                    RebuildPreview(dlg);
+                    ScheduleRebuild(dlg);
                     return TRUE;
 
                 case IDC_GAP_EDIT:
-                    if (code == EN_CHANGE) RebuildPreview(dlg);
+                    if (code == EN_CHANGE) ScheduleRebuild(dlg);
+                    return TRUE;
+
+                case IDC_CHK_AUTOLOAD_RECENT: {
+                    // Persist checkbox state and load immediately if toggled on.
+                    AppConfig& cfg = Settings::Get();
+                    cfg.stitchAutoLoadRecent =
+                        IsDlgButtonChecked(dlg, IDC_CHK_AUTOLOAD_RECENT) == BST_CHECKED;
+                    Settings::Save();
+                    Logger::Infof(L"Checkbox toggled: autoLoadRecent=%d, imageCount=%d",
+                                  cfg.stitchAutoLoadRecent, st->images.Count());
+                    if (cfg.stitchAutoLoadRecent && st->images.Count() == 0) {
+                        Logger::Info(L"Checkbox toggled on: triggering immediate load");
+                        LoadRecentCaptures(dlg);
+                        ScheduleRebuild(dlg);
+                    } else if (cfg.stitchAutoLoadRecent && st->images.Count() > 0) {
+                        Logger::Info(L"Checkbox toggled on but list not empty: skipping load");
+                    }
+                    return TRUE;
+                }
+
+                case IDC_EDIT_RECENT_COUNT:
+                    if (code == EN_CHANGE) {
+                        // Persist count change.
+                        BOOL ok = FALSE;
+                        const int count = static_cast<int>(
+                            GetDlgItemInt(dlg, IDC_EDIT_RECENT_COUNT, &ok, FALSE));
+                        if (ok && count >= 1 && count <= 100) {
+                            AppConfig& cfg = Settings::Get();
+                            cfg.stitchRecentCount = count;
+                            Settings::Save();
+                        }
+                    }
                     return TRUE;
 
                 case IDOK:
@@ -323,9 +426,21 @@ INT_PTR CALLBACK DialogProc(HWND dlg, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (st && st->images.IsDragging()) {
                 POINT pt = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
                 st->images.OnLButtonUp(pt);
-                RebuildPreview(dlg);
+                ScheduleRebuild(dlg);
             }
             return FALSE;
+
+        case WM_TIMER: {
+            // Debounce: the 150 ms timer fired, meaning no new changes came
+            // in during that window. Safe to rebuild now.
+            if (!st) break;
+            if (wParam == reinterpret_cast<UINT_PTR>(st)) {
+                KillTimer(dlg, wParam);
+                st->debounceTimer = 0;
+                RebuildPreview(dlg);
+            }
+            return TRUE;
+        }
 
         case WM_SIZE:
             if (st) st->layout.OnSize(dlg);
@@ -358,6 +473,7 @@ INT_PTR CALLBACK DialogProc(HWND dlg, UINT msg, WPARAM wParam, LPARAM lParam) {
 
         case WM_DESTROY:
             if (st) {
+                if (st->debounceTimer) KillTimer(dlg, st->debounceTimer);
                 st->images.Detach();
                 delete st;
                 SetWindowLongPtrW(dlg, DWLP_USER, 0);

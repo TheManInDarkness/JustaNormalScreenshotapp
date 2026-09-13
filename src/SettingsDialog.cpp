@@ -237,7 +237,7 @@ void BuildCaptureTab(HWND dlg, SettingsState* st) {
 
     MakeControl(dlg, st, TabCapture, L"STATIC",
                 L"Stop auto scroll after idle (ms):", SS_LEFT, 16, y + 3, 180, kLineH,
-                IDC_STATIC);
+                IDC_STATIC_SETTLE);
     MakeControl(dlg, st, TabCapture, L"EDIT", L"", WS_TABSTOP | WS_BORDER | ES_NUMBER,
                 200, y, 70, kEditH, IDC_EDIT_SETTLE, WS_EX_CLIENTEDGE);
     y += kEditH + kRowGap;
@@ -247,6 +247,42 @@ void BuildCaptureTab(HWND dlg, SettingsState* st) {
                 L"new appearing before it decides the page has ended. Raise it for a "
                 L"slow page that stalls part-way down.",
                 SS_LEFT, 16, y, 330, kLineH * 3, IDC_STATIC);
+    y += kLineH * 3 + kRowGap * 2;
+
+    MakeControl(dlg, st, TabCapture, L"BUTTON",
+                L"Keep scrolling until I press the stop key (no idle timeout)",
+                BS_AUTOCHECKBOX | WS_TABSTOP, 16, y, 330, kCheckH,
+                IDC_CHK_NO_IDLE_STOP);
+    y += kCheckH + kRowGap;
+
+    MakeControl(dlg, st, TabCapture, L"STATIC",
+                L"When ticked, auto-scroll never decides the page has ended on its "
+                L"own — it only stops when you press the stop hotkey, the height "
+                L"limit is reached, or you cancel. Useful for pages with long "
+                L"unchanging stretches (lazy gaps, sticky headers, non-scrolling "
+                L"targets). Use with care: a genuinely endless page will scroll "
+                L"forever.",
+                SS_LEFT, 16, y, 330, kLineH * 4, IDC_STATIC_NO_IDLE_WARN);
+    y += kLineH * 4 + kRowGap * 2;
+
+    MakeControl(dlg, st, TabCapture, L"BUTTON",
+                L"No height limit (capture until I stop it)",
+                BS_AUTOCHECKBOX | WS_TABSTOP, 16, y, 330, kCheckH,
+                IDC_CHK_NO_HEIGHT_LIMIT);
+    y += kCheckH + kRowGap;
+
+    MakeControl(dlg, st, TabCapture, L"STATIC", L"Max height (pixels):",
+                SS_LEFT, 16, y + 4, 120, kLineH, IDC_STATIC_MAX_ROWS);
+    MakeControl(dlg, st, TabCapture, L"EDIT", L"", WS_TABSTOP | WS_BORDER | ES_NUMBER,
+                200, y, 70, kEditH, IDC_EDIT_MAX_ROWS, WS_EX_CLIENTEDGE);
+    y += kEditH + kRowGap;
+
+    MakeControl(dlg, st, TabCapture, L"STATIC",
+                L"By default, a capture is forced to stop at 60000 pixels tall to "
+                L"prevent runaway composites. Tick the box above to remove this "
+                L"limit — useful for very long pages. Unticked, the edit box sets "
+                L"the cap (1000–500000 pixels).",
+                SS_LEFT, 16, y, 330, kLineH * 4, IDC_STATIC);
 }
 
 // ------------------------------------------------------------------- pdf --
@@ -358,6 +394,18 @@ void PopulateFromConfig(HWND dlg, SettingsState* st) {
     SetDlgItemInt(dlg, IDC_EDIT_DELAY, static_cast<UINT>(c.captureDelayMs), FALSE);
     SetDlgItemInt(dlg, IDC_EDIT_SETTLE, static_cast<UINT>(c.autoScrollSettleMs), FALSE);
 
+    CheckDlgButton(dlg, IDC_CHK_NO_IDLE_STOP,
+                   c.autoScrollNoIdleStop ? BST_CHECKED : BST_UNCHECKED);
+    SetDlgItemInt(dlg, IDC_EDIT_MAX_ROWS, static_cast<UINT>(c.autoScrollMaxRows), FALSE);
+    CheckDlgButton(dlg, IDC_CHK_NO_HEIGHT_LIMIT,
+                   c.autoScrollNoHeightLimit ? BST_CHECKED : BST_UNCHECKED);
+    const bool noIdle = c.autoScrollNoIdleStop;
+    const bool noLimit = c.autoScrollNoHeightLimit;
+    EnableWindow(GetDlgItem(dlg, IDC_EDIT_SETTLE), !noIdle);
+    EnableWindow(GetDlgItem(dlg, IDC_STATIC_SETTLE), !noIdle);
+    EnableWindow(GetDlgItem(dlg, IDC_EDIT_MAX_ROWS), !noLimit);
+    EnableWindow(GetDlgItem(dlg, IDC_STATIC_MAX_ROWS), !noLimit);
+
     CheckDlgButton(dlg, IDC_CHK_STARTUP, c.startWithWindows ? BST_CHECKED : BST_UNCHECKED);
     CheckDlgButton(dlg, IDC_CHK_NOTIFICATIONS,
                    c.showNotifications ? BST_CHECKED : BST_UNCHECKED);
@@ -413,6 +461,14 @@ bool HarvestIntoConfig(HWND dlg, SettingsState* st) {
     const int settle = static_cast<int>(GetDlgItemInt(dlg, IDC_EDIT_SETTLE, &ok, FALSE));
     c.autoScrollSettleMs =
         ok ? (std::max)(150, (std::min)(settle, 5000)) : c.autoScrollSettleMs;
+
+    c.autoScrollNoIdleStop =
+        IsDlgButtonChecked(dlg, IDC_CHK_NO_IDLE_STOP) == BST_CHECKED;
+    c.autoScrollNoHeightLimit =
+        IsDlgButtonChecked(dlg, IDC_CHK_NO_HEIGHT_LIMIT) == BST_CHECKED;
+    c.autoScrollMaxRows = static_cast<int>(GetDlgItemInt(dlg, IDC_EDIT_MAX_ROWS, nullptr, FALSE));
+    if (c.autoScrollMaxRows < 1000) c.autoScrollMaxRows = 1000;
+    if (c.autoScrollMaxRows > 500000) c.autoScrollMaxRows = 500000;
 
     c.startWithWindows = IsDlgButtonChecked(dlg, IDC_CHK_STARTUP) == BST_CHECKED;
     c.showNotifications = IsDlgButtonChecked(dlg, IDC_CHK_NOTIFICATIONS) == BST_CHECKED;
@@ -618,6 +674,27 @@ INT_PTR CALLBACK DialogProc(HWND dlg, UINT msg, WPARAM wParam, LPARAM lParam) {
                 case IDC_BTN_OPEN_LOGS:
                     Utils::OpenPath(AppPaths::GetAppDataFolder());
                     return TRUE;
+
+                case IDC_CHK_NO_IDLE_STOP: {
+                    // Keep the settle-ms edit and its label in lock-step with
+                    // the checkbox: they are meaningless when idle timeout is
+                    // disabled, so grey them out rather than letting the user
+                    // fiddle with a number that will be ignored.
+                    const bool noIdle =
+                        IsDlgButtonChecked(dlg, IDC_CHK_NO_IDLE_STOP) == BST_CHECKED;
+                    EnableWindow(GetDlgItem(dlg, IDC_EDIT_SETTLE), !noIdle);
+                    EnableWindow(GetDlgItem(dlg, IDC_STATIC_SETTLE), !noIdle);
+                    return TRUE;
+                }
+                case IDC_CHK_NO_HEIGHT_LIMIT: {
+                    // Same idea: the max-rows edit is meaningless when the limit
+                    // is disabled, so lock them together visually.
+                    const bool noLimit =
+                        IsDlgButtonChecked(dlg, IDC_CHK_NO_HEIGHT_LIMIT) == BST_CHECKED;
+                    EnableWindow(GetDlgItem(dlg, IDC_EDIT_MAX_ROWS), !noLimit);
+                    EnableWindow(GetDlgItem(dlg, IDC_STATIC_MAX_ROWS), !noLimit);
+                    return TRUE;
+                }
 
                 case IDOK: {
                     if (!HarvestIntoConfig(dlg, st)) return TRUE;

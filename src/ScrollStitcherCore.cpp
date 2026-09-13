@@ -105,17 +105,16 @@ MatchResult FindVerticalOverlap(const StripView& prev,
     if (!prev.Valid() || !next.Valid()) return result;
     if (prev.width != next.width) return result;
 
-    const int minRows = std::max(1, opt.minMatchRows);
+    const int minRows = std::max(
+        std::max(1, opt.minMatchRows),
+        static_cast<int>(prev.height * opt.minSearchFraction));
     const int maxK = std::min({prev.height, next.height,
                                static_cast<int>(prev.height * opt.maxSearchFraction)});
     if (maxK < minRows) return result;
 
-    // Anchors: distinctive rows near the top of `next`, guaranteed to sit
-    // inside the overlap region whenever an overlap exists at all. One is
-    // taken from each equal segment of the scan window, then they are ordered
-    // by detail - so the strongest anchor is still tried first and nothing
-    // changes for a frame that matches on it, but a band that has repainted
-    // can no longer veto the seam on its own.
+    // Anchors: distinctive rows in `next`, guaranteed to sit inside the overlap
+    // region whenever an overlap exists. One anchor is chosen from each equal
+    // segment of the scan window, ordered by detail.
     const int detailStep = std::max(1, opt.columnStep);
     struct Anchor {
         int row;
@@ -123,6 +122,7 @@ MatchResult FindVerticalOverlap(const StripView& prev,
     };
     Anchor anchors[kMaxAnchors];
     int anchorCount = 0;
+
     auto scanAnchors = [&](int limit) {
         anchorCount = 0;
         const int segments = std::min(kMaxAnchors, limit);
@@ -132,6 +132,11 @@ MatchResult FindVerticalOverlap(const StripView& prev,
             int best = -1;
             double bestDetail = kAnchorDetailFloor;
             for (int y = from; y < to; ++y) {
+                // Ignore rows that did not move between frames (e.g. sticky headers,
+                // pinned toolbars, or fixed navbars). An anchor must represent
+                // actual scrolling content.
+                if (y < prev.height && RowsMatch(prev, y, next, y, opt)) continue;
+
                 const double d = RowDetail(next, y, detailStep);
                 if (d > bestDetail) {
                     bestDetail = d;
@@ -143,50 +148,106 @@ MatchResult FindVerticalOverlap(const StripView& prev,
         std::sort(anchors, anchors + anchorCount,
                   [](const Anchor& a, const Anchor& b) { return a.detail > b.detail; });
     };
-    scanAnchors(std::min(maxK, 64));
+
+    // First scan up to 128 rows (or 25% of height) to find non-stationary anchors.
+    // Fall back to maxK if all top rows were stationary or featureless.
+    const int initialWindow = std::min(maxK, std::max(64, next.height / 4));
+    scanAnchors(initialWindow);
     if (anchorCount == 0) scanAnchors(maxK);
     if (anchorCount == 0) {
-        // Featureless content - any alignment is as defensible as any other,
-        // so refuse to guess rather than silently deleting rows.
+        // Check if the frame has visual detail and is completely stationary (real content that did not move).
+        // Flat/featureless blank frames must refuse to match (VerticalOverlap_FeaturelessContentRefusesToGuess).
+        if (prev.height == next.height) {
+            const int checkStep = std::max(1, prev.height / 32);
+            int total = 0, same = 0;
+            double maxDetail = 0.0;
+            for (int y = 0; y < prev.height; y += checkStep) {
+                ++total;
+                if (RowsMatch(prev, y, next, y, opt)) ++same;
+                const double d = RowDetail(next, y, detailStep);
+                if (d > maxDetail) maxDetail = d;
+            }
+            if (maxDetail >= kAnchorDetailFloor && total > 0 &&
+                static_cast<double>(same) / total >= opt.seamAcceptance) {
+                result.overlapRows = next.height;
+                result.matched = true;
+                result.confidence = static_cast<double>(same) / total;
+                return result;
+            }
+        }
+        // Entirely featureless content - refuse to guess.
         return result;
     }
 
-    // Walk candidate overlaps largest-first: the goal is to remove as much
-    // duplicated content as can be justified. A whole sweep is made per
-    // anchor rather than testing them together, so the extra anchors cost
-    // nothing at all until the strongest one has failed on every offset.
+    int bestK = 0;
+    double bestConfidence = 0.0;
+
+    // Walk candidate overlaps largest-first: find the best-fitting alignment.
     for (int a = 0; a < anchorCount; ++a) {
         for (int k = maxK; k >= minRows; --k) {
-            // The probe row has to lie inside the candidate overlap. For
-            // overlaps shorter than the chosen anchor row, fall back to the
-            // last row of the candidate region - a weaker filter, but k is
-            // small there so the full verification it lets through is cheap.
-            // That fallback does not depend on the anchor, so only the first
-            // sweep needs to do it.
             if (a > 0 && anchors[a].row >= k) continue;
             const int probe = (anchors[a].row < k) ? anchors[a].row : (k - 1);
             const int prevAnchorRow = prev.height - k + probe;
             if (prevAnchorRow < 0 || prevAnchorRow >= prev.height) continue;
 
-            // Cheap single-row reject before the full verification sweep.
+            // Quick single-row check on the anchor row before verifying the full seam.
             if (!RowsMatch(prev, prevAnchorRow, next, probe, opt)) continue;
 
             const int verifyStep = std::max(1, k / 96);
             int sampled = 0, matched = 0;
+            int detailedSampled = 0, detailedMatched = 0;
+
             for (int y = 0; y < k; y += verifyStep) {
+                const bool rowMatches =
+                    RowsMatch(prev, prev.height - k + y, next, y, opt);
                 ++sampled;
-                if (RowsMatch(prev, prev.height - k + y, next, y, opt)) ++matched;
+                if (rowMatches) ++matched;
+
+                // Track rows with visual detail separately so blank lines and
+                // uniform margins cannot falsely satisfy the acceptance threshold.
+                if (RowDetail(next, y, detailStep) >= kAnchorDetailFloor) {
+                    ++detailedSampled;
+                    if (rowMatches) ++detailedMatched;
+                }
             }
             if (!sampled) continue;
 
-            const double frac = static_cast<double>(matched) / sampled;
-            if (frac >= opt.seamAcceptance) {
-                result.overlapRows = k;
-                result.matched = true;
-                result.confidence = frac;
-                return result;
+            const double overallFrac = static_cast<double>(matched) / sampled;
+
+            // If the region has detailed rows, they must meet seamAcceptance.
+            if (detailedSampled > 0) {
+                const double detailedFrac =
+                    static_cast<double>(detailedMatched) / detailedSampled;
+                if (detailedFrac < opt.seamAcceptance) continue;
+            }
+
+            if (overallFrac >= opt.seamAcceptance && overallFrac > bestConfidence) {
+                bestK = k;
+                bestConfidence = overallFrac;
+
+                // An overwhelming match (>= 98%) can be taken immediately.
+                if (bestConfidence >= 0.98) {
+                    result.overlapRows = bestK;
+                    result.matched = true;
+                    result.confidence = bestConfidence;
+                    return result;
+                }
             }
         }
+
+        // If this anchor found a validated match >= seamAcceptance, accept it.
+        if (bestConfidence >= opt.seamAcceptance) {
+            result.overlapRows = bestK;
+            result.matched = true;
+            result.confidence = bestConfidence;
+            return result;
+        }
+    }
+
+    if (bestConfidence >= opt.seamAcceptance) {
+        result.overlapRows = bestK;
+        result.matched = true;
+        result.confidence = bestConfidence;
     }
     return result;
 }

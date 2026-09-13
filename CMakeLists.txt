@@ -88,13 +88,13 @@ add_custom_command(TARGET ScreenshotApp POST_BUILD
         $<TARGET_FILE_DIR:ScreenshotApp>/onnxruntime.dll
     COMMENT "Copying onnxruntime.dll beside the executable")
 
-if(BUILD_TESTS)
+if(BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests")
     enable_testing()
     add_subdirectory(tests)
 endif()
 
 # The OCR benchmark probe (tools/OcrProbe) - developer tool, not shipped.
 option(BUILD_OCRPROBE "Build the OCR benchmark console tool" ON)
-if(BUILD_OCRPROBE)
+if(BUILD_OCRPROBE AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools")
     add_subdirectory(tools)
 endif()

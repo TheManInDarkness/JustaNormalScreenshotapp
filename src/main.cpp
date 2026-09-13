@@ -9,6 +9,7 @@
 #include "IconCache.h"
 #include "Logger.h"
 #include "PDFConvertTool.h"
+#include "ScrollSession.h"
 #include "ScrollableCanvas.h"
 #include "SettingsDialog.h"
 #include "Settings.h"
@@ -72,6 +73,9 @@ void OnHotkey(HWND hwnd, int id) {
         case Hotkeys::Action::Capture:
         case Hotkeys::Action::CaptureAlt:
             CaptureController::DoCapture();
+            return;
+        case Hotkeys::Action::StopAutoScroll:
+            ScrollSession::StopCurrent();
             return;
     }
 }

@@ -7,7 +7,7 @@
 #include <string>
 #include <vector>
 
-// OCR entry point. Recognition runs on PaddleOCR (PP-OCRv4) through
+// OCR entry point. Recognition runs on PaddleOCR (PP-OCRv6) through
 // onnxruntime - materially stronger on small and syntax-highlighted text -
 // and falls back to Windows.Media.Ocr (the engine that ships with Windows,
 // reached through its C++/WinRT projection) whenever the PP-OCR runtime or

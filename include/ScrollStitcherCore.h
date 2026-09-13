@@ -36,6 +36,10 @@ struct MatchOptions {
     // search needs to be prevented from finding.
     double maxSearchFraction = 1.0;
 
+    // Minimum search fraction (0.0 = down to minMatchRows). Constrains the search
+    // to a narrow window when an expected scroll range is known, preventing false matches.
+    double minSearchFraction = 0.0;
+
     // Rows that must match before an offset is accepted. Too small and a run
     // of blank background matches anywhere; too large and short scrolls fail.
     int minMatchRows = 8;
@@ -48,7 +52,7 @@ struct MatchOptions {
     // Fraction of a row's pixels that must be within tolerance for the row to
     // count as matching. Below 1.0 so a blinking caret or a hover highlight
     // does not veto an otherwise perfect seam.
-    double rowMatchFraction = 0.90;
+    double rowMatchFraction = 0.97;
 
     // Fraction of *sampled rows* that must match for a candidate seam to be
     // accepted. Distinct from rowMatchFraction, which governs pixels within

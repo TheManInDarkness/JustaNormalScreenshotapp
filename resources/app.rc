@@ -71,6 +71,10 @@ BEGIN
     PUSHBUTTON      "Remove", IDC_STITCH_REMOVE, 56, 308, 44, 14
     PUSHBUTTON      "Up", IDC_STITCH_UP, 104, 308, 40, 14
     PUSHBUTTON      "Down", IDC_STITCH_DOWN, 148, 308, 40, 14
+    CONTROL         "Auto-load recent captures", IDC_CHK_AUTOLOAD_RECENT, "Button",
+                    BS_AUTOCHECKBOX | WS_TABSTOP, 8, 326, 110, 10
+    LTEXT           "Count:", IDC_STATIC_RECENT_COUNT, 122, 328, 24, 8
+    EDITTEXT        IDC_EDIT_RECENT_COUNT, 148, 326, 40, 13, ES_NUMBER | WS_TABSTOP
 
     CONTROL         "", IDC_PREVIEW_CANVAS, "ScreenshotAppCanvas",
                     WS_CHILD | WS_VISIBLE | WS_HSCROLL | WS_VSCROLL | WS_BORDER | WS_TABSTOP,

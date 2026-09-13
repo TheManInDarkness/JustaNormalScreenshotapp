@@ -216,7 +216,15 @@ std::string ToJson(const AppConfig& cfg) {
 
     j["scroll"] = {
         {"settleMs", cfg.autoScrollSettleMs},
+        {"noIdleStop", cfg.autoScrollNoIdleStop},
+        {"noHeightLimit", cfg.autoScrollNoHeightLimit},
+        {"maxRows", cfg.autoScrollMaxRows},
         {"removeOverlap", cfg.scrollRemoveOverlap},
+    };
+
+    j["stitch"] = {
+        {"autoLoadRecent", cfg.stitchAutoLoadRecent},
+        {"recentCount", cfg.stitchRecentCount},
     };
 
     j["pdf"] = {
@@ -279,8 +287,18 @@ bool FromJson(const std::string& text, AppConfig& out) {
     if (j.contains("scroll") && j["scroll"].is_object()) {
         const json& s = j["scroll"];
         cfg.autoScrollSettleMs = GetNumber<int>(s, "settleMs", defaults.autoScrollSettleMs, 50, 5000);
+        cfg.autoScrollNoIdleStop = GetBool(s, "noIdleStop", defaults.autoScrollNoIdleStop);
+        cfg.autoScrollNoHeightLimit = GetBool(s, "noHeightLimit", defaults.autoScrollNoHeightLimit);
+        cfg.autoScrollMaxRows = GetNumber<int>(s, "maxRows", defaults.autoScrollMaxRows, 1000, 500000);
         cfg.scrollRemoveOverlap = GetBool(s, "removeOverlap", defaults.scrollRemoveOverlap);
     }
+
+    if (j.contains("stitch") && j["stitch"].is_object()) {
+        const json& st = j["stitch"];
+        cfg.stitchAutoLoadRecent = GetBool(st, "autoLoadRecent", defaults.stitchAutoLoadRecent);
+        cfg.stitchRecentCount = GetNumber<int>(st, "recentCount", defaults.stitchRecentCount, 1, 100);
+    }
+
 
     if (j.contains("pdf") && j["pdf"].is_object()) {
         const json& p = j["pdf"];

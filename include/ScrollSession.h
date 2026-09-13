@@ -25,4 +25,8 @@ enum class Mode { Auto, Manual };
 // finishes by itself when the page stops moving.
 void Run(const RECT& region, Mode mode);
 
+// Stops the current auto-scroll session if one is active, stitching and saving
+// whatever has been captured so far.
+void StopCurrent();
+
 }  // namespace ScrollSession

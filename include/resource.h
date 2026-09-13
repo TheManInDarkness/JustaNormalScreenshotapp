@@ -52,6 +52,12 @@
 #define IDC_CHK_CURSOR                  1230
 #define IDC_EDIT_DELAY                  1232
 #define IDC_EDIT_SETTLE                 1233
+#define IDC_STATIC_SETTLE               1234
+#define IDC_CHK_NO_IDLE_STOP            1235
+#define IDC_STATIC_NO_IDLE_WARN         1236
+#define IDC_CHK_NO_HEIGHT_LIMIT         1237
+#define IDC_EDIT_MAX_ROWS               1238
+#define IDC_STATIC_MAX_ROWS             1239
 
 // Hotkeys tab
 #define IDC_HOTKEY_CAPTURE              1240
@@ -106,6 +112,10 @@
 #define IDC_STITCH_REMOVE               1312
 #define IDC_STITCH_UP                   1313
 #define IDC_STITCH_DOWN                 1314
+#define IDC_CHK_AUTOLOAD_RECENT         1315
+#define IDC_EDIT_RECENT_COUNT           1316
+#define IDC_STATIC_RECENT_COUNT         1317
+
 
 // ---------------------------------------------------------- pdf convert tool
 #define IDC_PDF_IMAGE_LIST              1400

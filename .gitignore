@@ -6,6 +6,7 @@ build/
 build-*/
 out/
 cmake-build-*/
+dist/
 
 # --- Visual Studio / MSBuild per-user state -----------------------------------
 .vs/
@@ -37,10 +38,24 @@ desktop.ini
 *.log
 Screenshots_*.png
 
+# --- Internal developer documentation & tests --------------------------------
+HANDOFF.md
+Plan.md
+PUBLISHING.md
+OCR_CONSULT.md
+tests/
+tools/
+attic/
+legacy codes/
+
 # --- Stray build/scratch artefacts --------------------------------------------
 *.obj
 last context.txt
 consult_ans.txt
+crop*.png
+gutter.png
+seam_*.png
+repeated_section.*
 
 # --- Local accuracy corpus -----------------------------------------------------
 # Real screen captures used by tools/OcrProbe for benchmarking. Deliberately

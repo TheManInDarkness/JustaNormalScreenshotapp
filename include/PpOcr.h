@@ -80,13 +80,10 @@ struct Options {
     bool debugDump = false;
 
     // Recognition crops are resized to 48 rows; this caps the resized
-    // WIDTH. A line wider than cap/48 aspect gets horizontally squeezed
-    // below its true aspect before the recognizer sees it - an 800 px code
-    // line at 13 px row height wants 2950 columns and the old hard 2000
-    // squeezed it by a third, blurring exactly the thin punctuation that
-    // regime keeps missing. The model accepts dynamic widths; the cap is
-    // pure cost control (recognition time scales with width).
-    int recMaxWidth = 2000;
+    // WIDTH. When 0 (the default), the true unconstrained aspect ratio is
+    // preserved (with an 8192 px memory guard), ensuring lines on 4K or
+    // zoomed-out editors are never squashed. A positive value caps to that width.
+    int recMaxWidth = 0;
 
     // Padding the recognition crop was measured and REJECTED (2026-08-25):
     // 0.08/0.15/0.25 of the box height cost 1.4/2.1/9.0 points of mean F1

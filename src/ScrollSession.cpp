@@ -31,49 +31,18 @@ constexpr UINT_PTR kTimerCapture = 1;
 // leaves overlapping frames to match against. The interval adapts: the more
 // of the viewport a single step revealed, the faster the user is scrolling,
 // and the sooner the next frame has to be taken to keep some overlap.
+// Manual mode polling intervals: adapts if user scrolls quickly.
 constexpr UINT kManualPollMs = 60;
 constexpr UINT kManualPollFastMs = 25;
 
-// Auto captures on its own timer while a separate thread turns the wheel, so
-// the page never stops moving and the capture never dictates its rhythm.
-constexpr UINT kAutoPollMs = 30;
+// Auto mode: pause duration between sending a wheel pulse and capturing the frame.
+// 80ms allows the target application's smooth scrolling / compositor to settle cleanly,
+// yielding sharp, stationary frames with zero motion blur.
+constexpr UINT kAutoSettleMs = 80;
 
-// The wheel heartbeat, and the range the capture loop is allowed to move it
-// through. One notch is ~100px in a browser, so 40ms is ~2500px/s to start
-// with; the ladder finds the real speed within a second on anything unusual.
-//
-// The floor of 4ms lets the wheel turn at up to ~30 000px/s — more than
-// enough for even the fastest pages — while the interval is the only thing
-// that ever changes, so the speed ladder never feels like it is taking jumps.
-// A single notch, moving at a continuously adjustable rate, is what makes the
-// scroll read as motion rather than a series of pulses.
-constexpr int kWheelIntervalStartMs = 40;
-constexpr int kWheelIntervalMinMs = 4;
-constexpr int kWheelIntervalMaxMs = 240;
-
-// The ladder reaches for another notch only once the interval has bottomed
-// out at kWheelIntervalMinMs, so this caps how big a single pulse may ever
-// become. It stays small on purpose: a big pulse is a jump, and a jump is
-// what the matcher has to guess at.
-constexpr int kMaxWheelNotches = 3;
-
-// How much of the region one capture tick should reveal. Below the floor the
-// scroll is needlessly slow; above the ceiling the next frame has too little
-// left of the previous one to match against. The gap between them is wide on
-// purpose - the goal is to settle on a speed and stay there, and a rate that
-// keeps being corrected is the stutter this replaced.
-constexpr double kRevealFloor = 0.08;
-constexpr double kRevealCeiling = 0.25;
-
-// A tick revealing this much has genuinely outrun the capture; that is worth
-// correcting at once rather than at the next scheduled review.
-constexpr double kRevealEmergency = 0.50;
-constexpr DWORD kSpeedReviewMs = 150;
-
-// Consecutive unmatchable frames that count as "the page is getting away from
-// us". Well under the budget before a join is guessed, so the wheel eases off
-// before any content has to be joined on faith.
-constexpr int kMissesBeforeEasingOff = 3;
+// Number of consecutive pulses where the screen did not move at all before
+// determining that the page has reached the end.
+constexpr int kMaxConsecutiveUnmoved = 2;
 
 // Session-scoped global hotkeys. Global rather than window-level because the
 // overlay never takes focus - the window being scrolled keeps it.
@@ -83,7 +52,12 @@ constexpr int kHotkeyCancel = 0xB002;
 // has been captured so far is stitched and saved).
 constexpr int kHotkeyStopAutoScroll = 0xB003;
 
-constexpr long long kMaxTotalRows = 60000;
+// Default hard cap on composite height, in pixels. Overridden by
+// AppConfig::autoScrollMaxRows when non-zero, and bypassed entirely when
+// AppConfig::autoScrollNoHeightLimit is true. Kept as a named constant
+// only so the session code has a sensible default if the config is
+// uninitialized.
+constexpr long long kDefaultMaxTotalRows = 60000;
 
 // Consecutive unmatchable frames before the view is accepted as having
 // genuinely jumped rather than merely being caught half-drawn.
@@ -232,73 +206,15 @@ private:
     Rect rect_;
 };
 
-// Auto mode's wheel, on a thread of its own.
-//
-// It used to be pulsed from the capture timer, and skipped for a tick whenever
-// a frame had failed to match or had revealed a lot at once. That is what made
-// the scroll lurch: the rhythm of the page was being set by whether an overlap
-// search had succeeded and how long it took, so the page ran, stalled, ran
-// again. Nothing about how fast a page should scroll depends on either.
-//
-// Here the pulse is a fixed heartbeat that no capture work can stall, and the
-// capture loop only ever nudges the *rate* - gradually, a few times a second
-// at most, so a speed change reads as the page easing off rather than
-// stuttering. SendInput is thread-safe and the wheel goes to whatever is under
-// the pointer, which auto parks over the region before any of this starts.
-class WheelDriver {
-public:
-    ~WheelDriver() { Stop(); }
-
-    bool Start(int notches, int intervalMs) {
-        if (thread_.joinable()) return true;
-        stopEvent_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-        if (!stopEvent_) return false;
-        notches_.store(notches, std::memory_order_relaxed);
-        intervalMs_.store(intervalMs, std::memory_order_relaxed);
-        thread_ = std::thread([this] { Run(); });
-        return true;
-    }
-
-    void Stop() {
-        if (stopEvent_) SetEvent(stopEvent_);
-        if (thread_.joinable()) thread_.join();
-        if (stopEvent_) {
-            CloseHandle(stopEvent_);
-            stopEvent_ = nullptr;
-        }
-    }
-
-    void SetPulse(int notches, int intervalMs) {
-        notches_.store(notches, std::memory_order_relaxed);
-        intervalMs_.store(intervalMs, std::memory_order_relaxed);
-    }
-    int Notches() const { return notches_.load(std::memory_order_relaxed); }
-    int Interval() const { return intervalMs_.load(std::memory_order_relaxed); }
-    bool Blocked() const { return blocked_.load(std::memory_order_relaxed); }
-
-private:
-    void Run() {
-        for (;;) {
-            INPUT input = {};
-            input.type = INPUT_MOUSE;
-            input.mi.dwFlags = MOUSEEVENTF_WHEEL;
-            input.mi.mouseData = static_cast<DWORD>(
-                -WHEEL_DELTA * notches_.load(std::memory_order_relaxed));
-            if (SendInput(1, &input, sizeof(input)) != 1) {
-                blocked_.store(true, std::memory_order_relaxed);
-            }
-            const DWORD wait = static_cast<DWORD>(
-                intervalMs_.load(std::memory_order_relaxed));
-            if (WaitForSingleObject(stopEvent_, wait) != WAIT_TIMEOUT) return;
-        }
-    }
-
-    std::thread thread_;
-    HANDLE stopEvent_ = nullptr;
-    std::atomic<int> notches_{1};
-    std::atomic<int> intervalMs_{kWheelIntervalStartMs};
-    std::atomic<bool> blocked_{false};
-};
+// Sends a mouse wheel scroll pulse of N notches.
+// Negative delta scrolls down in Windows.
+bool SendWheelPulse(int notches) {
+    INPUT input = {};
+    input.type = INPUT_MOUSE;
+    input.mi.dwFlags = MOUSEEVENTF_WHEEL;
+    input.mi.mouseData = static_cast<DWORD>(-WHEEL_DELTA * notches);
+    return SendInput(1, &input, sizeof(input)) == 1;
+}
 
 struct Session {
     HWND hwnd = nullptr;
@@ -331,16 +247,17 @@ struct Session {
     bool finished = false;
     bool cancelled = false;
 
-    // Auto mode's wheel driver, and the feedback that paces it.
-    WheelDriver wheel;
-    DWORD autoIdleMs = 450;       // no new rows for this long = end of the page
+    // Auto scroll state.
+    int notches = 2;              // Wheel notches per pulse (reveals ~20-30% of viewport)
+    int unmovedSteps = 0;         // Consecutive pulses where content did not move
+    bool inputBlocked = false;    // True if SendInput failed (e.g. UIPI restriction)
+    DWORD autoIdleMs = 450;       // Safety timeout if window stops responding
     DWORD lastProgressTick = 0;
-    DWORD lastSpeedReview = 0;
-    double revealShare = 0.0;     // smoothed rows-per-tick, as a fraction of the region
     bool autoStarted = false;
+    long long maxRows = 0;        // 0 = no limit (set from AppConfig at session start)
 
     std::wstring finishKey = L"Enter";
-    std::wstring stopKey;            // e.g. "Pause" — empty when no stop hotkey is registered
+    std::wstring stopKey;         // e.g. "Pause" — empty when no stop hotkey is registered
     std::wstring notice;
 
     POINT cursorAtStart = {};
@@ -596,7 +513,17 @@ int CaptureStep(Session* s) {
     const uint64_t hash = FastHash(frame.get());
     if (hash == s->lastHash) return 0;
 
-    const stitch::MatchOptions matchOpt = LiveMatchOptions();
+    stitch::MatchOptions matchOpt = LiveMatchOptions();
+    if (s->mode == Mode::Auto) {
+        // In Auto Scroll, the controlled step advances ~15% to 50% of the viewport.
+        // Constraining the search bounds ensures candidate overlaps cannot falsely
+        // match sticky headers near the top or distant paragraphs far down the page.
+        matchOpt.minSearchFraction = 0.20;
+        matchOpt.maxSearchFraction = 0.95;
+    } else {
+        matchOpt.minSearchFraction = 0.02;
+        matchOpt.maxSearchFraction = 0.98;
+    }
 
     int newRows = 0;
     bool matched = false;
@@ -686,8 +613,15 @@ int CaptureStep(Session* s) {
         // keep waiting instead.
         if (sameView >= 0.5) return -1;
 
-        // Sustained failure on genuinely different content means the view
-        // really did jump further than a whole viewport - nothing to match
+        // In Auto Scroll, never blindly butt-join! Content moves under our control,
+        // so jumping across entire pages cannot happen. Retrying or finishing on idle
+        // is far safer than baking duplicate content into the image.
+        if (s->mode == Mode::Auto) {
+            return -1;
+        }
+
+        // In Manual Scroll, sustained failure on genuinely different content means
+        // the view really did jump further than a whole viewport - nothing to match
         // against, so the join is a guess.
         newRows = height;
         ++s->uncertainJoins;
@@ -716,7 +650,13 @@ int CaptureStep(Session* s) {
     ++s->frameCount;
     s->lastFull = std::move(frame);
 
-    if (s->totalRows > kMaxTotalRows) {
+    // Height cap: read from the live config once per session start (see
+    // session setup), then cached on the session so a settings change
+    // mid-session cannot retroactively extend a capture that was started
+    // with a smaller limit. 0 means "no limit" and the check is skipped.
+    if (s->maxRows > 0 && s->totalRows > s->maxRows) {
+        Logger::Infof(L"Auto scroll stopped: height limit reached (%lld pixels, %d frames)",
+                      s->totalRows, s->frameCount);
         s->notice = L"Height limit reached — finishing";
         Repaint(s);
         s->finished = true;
@@ -743,108 +683,62 @@ void ManualTick(Session* s, HWND hwnd) {
     }
 }
 
-// One step along auto's speed ladder. Both directions prefer adjusting the
-// interval (fine-grained, ~10% steps) over changing the notch count (which is
-// a 1/n jump). The result is a scroll that reads as continuous motion: small
-// speed corrections happen often enough that the eye never sees one, and the
-// notch count only changes at the extremes.
-//
-// The old code sped up by cutting the interval by 20% and slowed down by
-// either dropping a whole notch (which could be 50% slower) or raising the
-// interval by 25%. Those are the jumps that made a fast scroll feel stuttery
-// and a slow-down feel like a lurch.
-void NudgeScrollSpeed(Session* s, bool faster) {
-    int notches = s->wheel.Notches();
-    int interval = s->wheel.Interval();
-
-    if (faster) {
-        if (interval > kWheelIntervalMinMs) {
-            // ~10% faster, floored so it never drops below the minimum.
-            int next = interval - (std::max)(1, interval / 10);
-            interval = (std::max)(kWheelIntervalMinMs, next);
-        } else if (notches < kMaxWheelNotches) {
-            ++notches;
-        } else {
-            return;  // already flat out
-        }
-    } else {
-        if (interval < kWheelIntervalMaxMs) {
-            // ~10% slower, capped so it never exceeds the maximum.
-            int next = interval + (std::max)(1, interval / 10);
-            interval = (std::min)(kWheelIntervalMaxMs, next);
-        } else if (notches > 1) {
-            --notches;
-        } else {
-            return;  // already as gentle as it goes
-        }
-    }
-
-    s->wheel.SetPulse(notches, interval);
-    Logger::Debugf(L"Auto scroll: %s to %d notch%s every %d ms (revealing %.0f%%)",
-                   faster ? L"speeding up" : L"easing off", notches,
-                   notches == 1 ? L"" : L"es", interval, s->revealShare * 100.0);
-}
-
-// Auto captures on this tick while the wheel turns on its own thread, so the
-// page scrolls continuously and frames are taken while it is moving - exactly
-// what manual mode does, with the app supplying the wheel.
-//
-// Nothing here ever stops the scroll except the user pressing the stop hotkey
-// (which sets `finished`), the idle timeout, or the height limit. The only
-// lever this has on the scroll is the pulse rate, and that is reviewed a few
-// times a second rather than every tick, because a rate that keeps being
-// corrected is indistinguishable from the stop-and-go it replaced.
+// Auto captures on this tick after the target window has settled from the previous pulse.
+// Each tick inspects the stationary view, aligns and stitches any new rows,
+// checks if the bottom of the page has been reached, and sends the next pulse.
 void AutoTick(Session* s) {
+    if (s->finished || s->cancelled) return;
+
+    // Capture the screen now that the window has settled from the previous pulse.
     const int rows = CaptureStep(s);
-    const int viewport =
-        s->lastFull ? static_cast<int>(s->lastFull->GetHeight()) : 0;
+    if (s->finished || s->cancelled) return;
+
     const DWORD now = GetTickCount();
 
     if (rows > 0) {
+        // Content moved and new rows were stitched.
+        s->unmovedSteps = 0;
         s->lastProgressTick = now;
         RepaintThrottled(s);
-    } else if (s->autoStarted && now - s->lastProgressTick >= s->autoIdleMs) {
-        // The wheel has been turning and nothing new has appeared for a
-        // while: the end of the page, or a target that is not taking
-        // synthetic input at all.
-        Logger::Infof(L"Auto scroll finished (%lld rows, %d frames, %d uncertain)",
-                      s->totalRows, s->frameCount, s->uncertainJoins);
+    } else if (rows == 0) {
+        // Content did not move. If it doesn't move after consecutive pulses,
+        // we have reached the bottom of the scrollable page.
+        ++s->unmovedSteps;
+
+        const AppConfig& cfg = Settings::Get();
+        const bool allowIdleStop = !cfg.autoScrollNoIdleStop;
+
+        if (allowIdleStop && s->unmovedSteps >= kMaxConsecutiveUnmoved) {
+            Logger::Infof(L"Auto scroll finished: reached bottom of page (%lld rows, %d frames)",
+                          s->totalRows, s->frameCount);
+            s->finished = true;
+            return;
+        }
+    } else {
+        // rows == -1: frame could not be matched yet (e.g. window still drawing).
+        // Wait another settle interval without pulsing so the app can finish drawing.
+        if (s->autoStarted && !Settings::Get().autoScrollNoIdleStop &&
+            now - s->lastProgressTick >= s->autoIdleMs) {
+            Logger::Infof(L"Auto scroll finished: idle timeout (%lld rows, %d frames)",
+                          s->totalRows, s->frameCount);
+            s->finished = true;
+            return;
+        }
+        return;
+    }
+
+    // Safety timeout if content stops moving or keeps failing.
+    if (s->autoStarted && !Settings::Get().autoScrollNoIdleStop &&
+        now - s->lastProgressTick >= s->autoIdleMs) {
+        Logger::Infof(L"Auto scroll finished: idle timeout (%lld rows, %d frames)",
+                      s->totalRows, s->frameCount);
         s->finished = true;
         return;
     }
 
-    if (rows > 0 && viewport > 0) {
-        // Smoothed rather than instantaneous: a single tick that happened to
-        // land between two repaints says nothing about how fast the page is
-        // actually going.
-        const double share = static_cast<double>(rows) / viewport;
-        s->revealShare =
-            (s->revealShare > 0.0) ? s->revealShare * 0.7 + share * 0.3 : share;
-
-        if (share >= kRevealEmergency) {
-            // Genuinely outrunning the capture - worth correcting at once
-            // rather than at the next scheduled review. Two fine-grained
-            // steps rather than one large one, so the page eases off rather
-            // than lurches.
-            s->lastSpeedReview = now;
-            NudgeScrollSpeed(s, /*faster=*/false);
-            NudgeScrollSpeed(s, /*faster=*/false);
-            return;
-        }
-    }
-
-    if (now - s->lastSpeedReview < kSpeedReviewMs) return;
-    s->lastSpeedReview = now;
-
-    // A run of frames that will not match is as much a signal as one that
-    // revealed too much: it means the page is moving further between grabs
-    // than the matcher can follow. Without this the ladder would be blind to
-    // it, because an unmatchable frame reveals no rows to measure.
-    if (s->consecutiveMisses >= kMissesBeforeEasingOff ||
-        s->revealShare > kRevealCeiling) {
-        NudgeScrollSpeed(s, /*faster=*/false);
-    } else if (s->revealShare > 0.0 && s->revealShare < kRevealFloor) {
-        NudgeScrollSpeed(s, /*faster=*/true);
+    // Send the next wheel pulse for the next step.
+    if (!SendWheelPulse(s->notches)) {
+        s->inputBlocked = true;
     }
 }
 
@@ -1122,18 +1016,11 @@ void Run(const RECT& region, Mode mode) {
     RegisterHotKey(session.hwnd, kHotkeyCancel, MOD_NOREPEAT, VK_ESCAPE);
 
     // Stop hotkey: only meaningful for auto mode. The global HotkeyManager
-    // already registered this binding for the hidden hub window; that one
-    // never sees WM_HOTKEY because it is not the foreground window, so we
-    // shadow it with our own registration on the overlay for the session.
+    // already registered this binding for the hidden hub window, and OnHotkey
+    // routes it directly to ScrollSession::StopCurrent().
     const HotkeyBinding stopBinding = Settings::Get().hotkeyStopAutoScroll;
     if (mode == Mode::Auto && stopBinding.enabled && stopBinding.vk != 0) {
-        if (RegisterHotKey(session.hwnd, kHotkeyStopAutoScroll,
-                           stopBinding.modifiers | MOD_NOREPEAT, stopBinding.vk)) {
-            session.stopKey = DescribeHotkey(stopBinding);
-        } else {
-            Logger::Warnf(L"Scroll capture: could not register stop hotkey (%s)",
-                          DescribeHotkey(stopBinding).c_str());
-        }
+        session.stopKey = DescribeHotkey(stopBinding);
     }
 
     if (mode == Mode::Auto) {
@@ -1162,31 +1049,49 @@ void Run(const RECT& region, Mode mode) {
     CaptureStep(&session);
     Repaint(&session);
 
-    // Both modes now run the same continuous loop: capture on a timer while
-    // the page moves. The only difference is who turns the wheel.
+    // Both modes run on the capture timer. Auto mode captures stationary frames
+    // between controlled wheel pulses; manual mode captures while the user scrolls.
     if (mode == Mode::Auto) {
         const AppConfig& cfg = Settings::Get();
-        session.autoIdleMs = static_cast<DWORD>(
-            (std::max)(200, (std::min)(cfg.autoScrollSettleMs, 3000)));
+        // When no-idle-stop is on, `autoIdleMs` is never consulted (the
+        // AutoTick branch that stops on idle is guarded). Setting it to the
+        // largest representable value is belt-and-braces: if the flag is
+        // ever ignored by mistake, the session will outlive the user rather
+        // than finishing on a spurious idle window.
+        session.autoIdleMs =
+            cfg.autoScrollNoIdleStop
+                ? static_cast<DWORD>(0xFFFFFFFF)
+                : static_cast<DWORD>(
+                      (std::max)(200, (std::min)(cfg.autoScrollSettleMs, 3000)));
+
+        // Height cap: read once here and cached on the session so a settings
+        // change mid-session cannot retroactively extend a capture that was
+        // started with a smaller limit. 0 means "no limit" and the check in
+        // CaptureStep is skipped.
+        session.maxRows = cfg.autoScrollNoHeightLimit
+                              ? 0
+                              : static_cast<long long>(
+                                    (std::max)(1000, (std::min)(cfg.autoScrollMaxRows, 500000)));
+
+        // Scale the pulse to the captured region: smaller regions need smaller pulses
+        // so that each step reveals roughly 20-30% of the viewport, preserving ample overlap.
+        const int regionHeight = session.region.bottom - session.region.top;
+        session.notches = (regionHeight < 500) ? 1 : ((regionHeight < 900) ? 2 : 3);
+        session.pollMs = kAutoSettleMs;
+        session.lastProgressTick = GetTickCount();
+        session.autoStarted = true;
+        session.unmovedSteps = 0;
 
         // Nothing has moved yet, so this re-takes the same view - but with
         // anything the target only got round to drawing (a hover highlight,
         // a scrollbar fading in) now in the frame the next one is matched
         // against.
         RebaselineFirstFrame(&session);
-        session.pollMs = kAutoPollMs;
-        session.lastProgressTick = GetTickCount();
-        session.lastSpeedReview = session.lastProgressTick;
 
-        // The wheel starts here and does not stop until the session ends.
-        if (session.wheel.Start(1, kWheelIntervalStartMs)) {
-            session.autoStarted = true;
-        } else {
-            Logger::Error(L"Auto scroll: could not start the wheel thread");
-            session.notice = L"Could not start scrolling — try the mode where you scroll";
-            Repaint(&session);
-            PumpFor(1400);
-            session.cancelled = true;
+        // Send the initial pulse to start the step-and-settle sequence.
+        if (!SendWheelPulse(session.notches)) {
+            session.inputBlocked = true;
+            Logger::Warn(L"Auto scroll: SendInput failed (input may be blocked by OS)");
         }
     } else {
         session.pollMs = kManualPollMs;
@@ -1207,18 +1112,12 @@ void Run(const RECT& region, Mode mode) {
     KillTimer(session.hwnd, kTimerCapture);
 
     if (mode == Mode::Auto) {
-        // Before anything else: the wheel must stop turning the moment the
-        // session is over, or it keeps scrolling the user's window while the
-        // capture is being stitched.
-        const bool blocked = session.wheel.Blocked();
-        session.wheel.Stop();
-
         if (session.cursorParked) {
             SetCursorPos(session.cursorAtStart.x, session.cursorAtStart.y);
         }
         if (session.frameCount <= 1 && !session.cancelled) {
             session.notice =
-                blocked
+                session.inputBlocked
                     ? L"Windows blocked the scroll — try the mode where you scroll"
                     : L"That window did not scroll — try the mode where you scroll";
             Repaint(&session);
@@ -1228,7 +1127,6 @@ void Run(const RECT& region, Mode mode) {
 
     UnregisterHotKey(session.hwnd, kHotkeyFinish);
     UnregisterHotKey(session.hwnd, kHotkeyCancel);
-    UnregisterHotKey(session.hwnd, kHotkeyStopAutoScroll);
 
     const bool cancelled = session.cancelled;
 
@@ -1243,6 +1141,13 @@ void Run(const RECT& region, Mode mode) {
         return;
     }
     StitchAndDeliver(&session);
+}
+
+void StopCurrent() {
+    if (g_session && g_session->mode == Mode::Auto) {
+        Logger::Info(L"Auto scroll stopped early by stop hotkey");
+        g_session->finished = true;
+    }
 }
 
 }  // namespace ScrollSession

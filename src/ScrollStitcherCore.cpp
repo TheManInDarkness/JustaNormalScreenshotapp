@@ -61,15 +61,23 @@ bool ColumnsMatch(const StripView& a, int colA,
                   const StripView& b, int colB,
                   const MatchOptions& opt) {
     const int step = std::max(1, opt.columnStep);
-    int total = 0, ok = 0;
-    for (int y = 0; y < a.height && y < b.height; y += step) {
+    const int totalHeight = std::min(a.height, b.height);
+    const int total = (totalHeight + step - 1) / step;
+    if (total <= 0) return false;
+
+    // Minimum matching pixels required and maximum allowed mismatches for early exit
+    const int minMatching = static_cast<int>(std::ceil(total * opt.rowMatchFraction));
+    const int maxMismatches = total - minMatching;
+    int mismatches = 0;
+
+    for (int y = 0; y < totalHeight; y += step) {
         const uint8_t* pa = a.Row(y) + static_cast<size_t>(colA) * 4;
         const uint8_t* pb = b.Row(y) + static_cast<size_t>(colB) * 4;
-        ++total;
-        if (PixelsClose(pa, pb, opt.pixelTolerance)) ++ok;
+        if (!PixelsClose(pa, pb, opt.pixelTolerance)) {
+            if (++mismatches > maxMismatches) return false;
+        }
     }
-    if (!total) return false;
-    return static_cast<double>(ok) / total >= opt.rowMatchFraction;
+    return true;
 }
 
 }  // namespace
@@ -82,20 +90,25 @@ bool RowsMatch(const StripView& a, int rowA,
 
     const int step = std::max(1, opt.columnStep);
     const int width = std::min(a.width, b.width);
+    const int total = (width + step - 1) / step;
+    if (total <= 0) return false;
+
+    // Minimum matching pixels required and maximum allowed mismatches for early exit
+    const int minMatching = static_cast<int>(std::ceil(total * opt.rowMatchFraction));
+    const int maxMismatches = total - minMatching;
+    int mismatches = 0;
+
     const uint8_t* pa = a.Row(rowA);
     const uint8_t* pb = b.Row(rowB);
 
-    int total = 0, ok = 0;
     for (int x = 0; x < width; x += step) {
-        ++total;
-        if (PixelsClose(pa + static_cast<size_t>(x) * 4,
+        if (!PixelsClose(pa + static_cast<size_t>(x) * 4,
                         pb + static_cast<size_t>(x) * 4,
                         opt.pixelTolerance)) {
-            ++ok;
+            if (++mismatches > maxMismatches) return false;
         }
     }
-    if (!total) return false;
-    return static_cast<double>(ok) / total >= opt.rowMatchFraction;
+    return true;
 }
 
 MatchResult FindVerticalOverlap(const StripView& prev,
@@ -112,10 +125,20 @@ MatchResult FindVerticalOverlap(const StripView& prev,
                                static_cast<int>(prev.height * opt.maxSearchFraction)});
     if (maxK < minRows) return result;
 
+    // Cache row detail to avoid redundant recomputations across candidate checks.
+    const int detailStep = std::max(1, opt.columnStep);
+    std::vector<double> rowDetailCache(next.height, -1.0);
+    auto GetRowDetail = [&](int y) -> double {
+        if (y < 0 || y >= next.height) return 0.0;
+        if (rowDetailCache[y] < 0.0) {
+            rowDetailCache[y] = RowDetail(next, y, detailStep);
+        }
+        return rowDetailCache[y];
+    };
+
     // Anchors: distinctive rows in `next`, guaranteed to sit inside the overlap
     // region whenever an overlap exists. One anchor is chosen from each equal
     // segment of the scan window, ordered by detail.
-    const int detailStep = std::max(1, opt.columnStep);
     struct Anchor {
         int row;
         double detail;
@@ -137,7 +160,7 @@ MatchResult FindVerticalOverlap(const StripView& prev,
                 // actual scrolling content.
                 if (y < prev.height && RowsMatch(prev, y, next, y, opt)) continue;
 
-                const double d = RowDetail(next, y, detailStep);
+                const double d = GetRowDetail(y);
                 if (d > bestDetail) {
                     bestDetail = d;
                     best = y;
@@ -164,7 +187,7 @@ MatchResult FindVerticalOverlap(const StripView& prev,
             for (int y = 0; y < prev.height; y += checkStep) {
                 ++total;
                 if (RowsMatch(prev, y, next, y, opt)) ++same;
-                const double d = RowDetail(next, y, detailStep);
+                const double d = GetRowDetail(y);
                 if (d > maxDetail) maxDetail = d;
             }
             if (maxDetail >= kAnchorDetailFloor && total > 0 &&
@@ -187,6 +210,12 @@ MatchResult FindVerticalOverlap(const StripView& prev,
         for (int k = maxK; k >= minRows; --k) {
             if (a > 0 && anchors[a].row >= k) continue;
             const int probe = (anchors[a].row < k) ? anchors[a].row : (k - 1);
+            if (probe < 0) continue;
+            // Never probe a fallback row that lacks sufficient detail
+            if (probe != anchors[a].row && GetRowDetail(probe) < kAnchorDetailFloor) {
+                continue;
+            }
+
             const int prevAnchorRow = prev.height - k + probe;
             if (prevAnchorRow < 0 || prevAnchorRow >= prev.height) continue;
 
@@ -194,23 +223,35 @@ MatchResult FindVerticalOverlap(const StripView& prev,
             if (!RowsMatch(prev, prevAnchorRow, next, probe, opt)) continue;
 
             const int verifyStep = std::max(1, k / 96);
-            int sampled = 0, matched = 0;
+            const int totalSamples = (k + verifyStep - 1) / verifyStep;
+            const int minAcceptSamples = static_cast<int>(std::ceil(totalSamples * opt.seamAcceptance));
+            const int maxFailedSamples = totalSamples - minAcceptSamples;
+
+            int sampled = 0, matched = 0, failed = 0;
             int detailedSampled = 0, detailedMatched = 0;
+            bool candidateValid = true;
 
             for (int y = 0; y < k; y += verifyStep) {
                 const bool rowMatches =
                     RowsMatch(prev, prev.height - k + y, next, y, opt);
                 ++sampled;
-                if (rowMatches) ++matched;
+                if (rowMatches) {
+                    ++matched;
+                } else {
+                    if (++failed > maxFailedSamples) {
+                        candidateValid = false;
+                        break; // Exceeded maximum allowable row mismatches
+                    }
+                }
 
                 // Track rows with visual detail separately so blank lines and
                 // uniform margins cannot falsely satisfy the acceptance threshold.
-                if (RowDetail(next, y, detailStep) >= kAnchorDetailFloor) {
+                if (GetRowDetail(y) >= kAnchorDetailFloor) {
                     ++detailedSampled;
                     if (rowMatches) ++detailedMatched;
                 }
             }
-            if (!sampled) continue;
+            if (!candidateValid || !sampled) continue;
 
             const double overallFrac = static_cast<double>(matched) / sampled;
 
@@ -265,11 +306,20 @@ MatchResult FindHorizontalOverlap(const StripView& prev,
     if (maxK < minCols) return result;
 
     const int detailStep = std::max(1, opt.columnStep);
+    std::vector<double> colDetailCache(next.width, -1.0);
+    auto GetColDetail = [&](int x) -> double {
+        if (x < 0 || x >= next.width) return 0.0;
+        if (colDetailCache[x] < 0.0) {
+            colDetailCache[x] = ColumnDetail(next, x, detailStep);
+        }
+        return colDetailCache[x];
+    };
+
     int anchor = -1;
     double bestDetail = 0.0;
     auto scanAnchors = [&](int limit) {
         for (int x = 0; x < limit; ++x) {
-            double d = ColumnDetail(next, x, detailStep);
+            double d = GetColDetail(x);
             if (d > bestDetail) {
                 bestDetail = d;
                 anchor = x;
@@ -282,17 +332,34 @@ MatchResult FindHorizontalOverlap(const StripView& prev,
 
     for (int k = maxK; k >= minCols; --k) {
         const int probe = (anchor < k) ? anchor : (k - 1);
+        if (probe < 0) continue;
+        if (probe != anchor && GetColDetail(probe) < kAnchorDetailFloor) {
+            continue;
+        }
+
         const int prevAnchorCol = prev.width - k + probe;
         if (prevAnchorCol < 0 || prevAnchorCol >= prev.width) continue;
         if (!ColumnsMatch(prev, prevAnchorCol, next, probe, opt)) continue;
 
         const int verifyStep = std::max(1, k / 96);
-        int sampled = 0, matched = 0;
+        const int totalSamples = (k + verifyStep - 1) / verifyStep;
+        const int minAcceptSamples = static_cast<int>(std::ceil(totalSamples * opt.seamAcceptance));
+        const int maxFailedSamples = totalSamples - minAcceptSamples;
+
+        int sampled = 0, matched = 0, failed = 0;
+        bool candidateValid = true;
         for (int x = 0; x < k; x += verifyStep) {
             ++sampled;
-            if (ColumnsMatch(prev, prev.width - k + x, next, x, opt)) ++matched;
+            if (ColumnsMatch(prev, prev.width - k + x, next, x, opt)) {
+                ++matched;
+            } else {
+                if (++failed > maxFailedSamples) {
+                    candidateValid = false;
+                    break;
+                }
+            }
         }
-        if (!sampled) continue;
+        if (!candidateValid || !sampled) continue;
 
         const double frac = static_cast<double>(matched) / sampled;
         if (frac >= opt.seamAcceptance) {

@@ -184,7 +184,8 @@ Bitmap* StitchScrollFrames(const std::vector<Bitmap*>& strips, bool removeOverla
 
 Bitmap* StitchManual(const std::vector<Bitmap*>& images, stitch::Direction direction,
                      stitch::Align align, int gap, bool removeOverlap,
-                     bool normalizeWidth) {
+                     bool normalizeWidth, int maxDimension, int* outFullWidth,
+                     int* outFullHeight) {
     if (images.empty()) return nullptr;
 
     std::vector<std::unique_ptr<Bitmap>> owned;
@@ -193,7 +194,11 @@ Bitmap* StitchManual(const std::vector<Bitmap*>& images, stitch::Direction direc
         sources = NormalizeWidths(images, owned);
     }
     if (sources.empty()) return nullptr;
-    if (sources.size() == 1 && !removeOverlap) return Utils::CloneBitmap(sources[0]);
+    if (sources.size() == 1 && !removeOverlap && maxDimension <= 0) {
+        if (outFullWidth) *outFullWidth = static_cast<int>(sources[0]->GetWidth());
+        if (outFullHeight) *outFullHeight = static_cast<int>(sources[0]->GetHeight());
+        return Utils::CloneBitmap(sources[0]);
+    }
 
     // Work out how much of each image duplicates its predecessor.
     std::vector<int> trims(sources.size(), 0);
@@ -234,28 +239,44 @@ Bitmap* StitchManual(const std::vector<Bitmap*>& images, stitch::Direction direc
     const stitch::LayoutResult layout = stitch::ComputeLayout(items, direction, align, gap);
     if (layout.canvasWidth <= 0 || layout.canvasHeight <= 0) return nullptr;
 
-    // Refuse absurd canvases rather than attempting a multi-gigabyte
-    // allocation: a dozen full-screen captures stacked vertically reaches
-    // hundreds of megapixels, and GDI+ failing halfway is far less useful
-    // than saying so up front.
+    if (outFullWidth) *outFullWidth = layout.canvasWidth;
+    if (outFullHeight) *outFullHeight = layout.canvasHeight;
+
+    double scale = 1.0;
+    int targetW = layout.canvasWidth;
+    int targetH = layout.canvasHeight;
+    if (maxDimension > 0) {
+        const int maxSide = (std::max)(layout.canvasWidth, layout.canvasHeight);
+        if (maxSide > maxDimension) {
+            scale = static_cast<double>(maxDimension) / maxSide;
+            targetW = (std::max)(1, static_cast<int>(layout.canvasWidth * scale));
+            targetH = (std::max)(1, static_cast<int>(layout.canvasHeight * scale));
+        }
+    }
+
+    // Refuse absurd canvases rather than attempting a multi-gigabyte allocation.
     constexpr long long kMaxPixels = 250LL * 1000 * 1000;
-    const long long pixels =
-        static_cast<long long>(layout.canvasWidth) * layout.canvasHeight;
+    const long long pixels = static_cast<long long>(targetW) * targetH;
     if (pixels > kMaxPixels) {
         Logger::Errorf(L"Refusing to stitch: result would be %dx%d (%.0f megapixels)",
-                       layout.canvasWidth, layout.canvasHeight, pixels / 1e6);
+                       targetW, targetH, pixels / 1e6);
         return nullptr;
     }
 
     std::unique_ptr<Bitmap> out(
-        new Bitmap(layout.canvasWidth, layout.canvasHeight, PixelFormat32bppPARGB));
+        new Bitmap(targetW, targetH, PixelFormat32bppPARGB));
     if (!out || out->GetLastStatus() != Ok) return nullptr;
 
     Graphics g(out.get());
     g.Clear(Color(255, 255, 255, 255));  // white behind any gaps
     g.SetCompositingMode(CompositingModeSourceCopy);
-    g.SetInterpolationMode(InterpolationModeNearestNeighbor);
-    g.SetPixelOffsetMode(PixelOffsetModeHalf);
+    if (scale < 1.0) {
+        g.SetInterpolationMode(InterpolationModeBilinear);
+        g.SetPixelOffsetMode(PixelOffsetModeHighQuality);
+    } else {
+        g.SetInterpolationMode(InterpolationModeNearestNeighbor);
+        g.SetPixelOffsetMode(PixelOffsetModeHalf);
+    }
 
     for (size_t i = 0; i < layout.rects.size() && i < sources.size(); ++i) {
         const stitch::LayoutRect& r = layout.rects[i];
@@ -263,8 +284,18 @@ Bitmap* StitchManual(const std::vector<Bitmap*>& images, stitch::Direction direc
 
         const int srcX = direction == stitch::Direction::Horizontal ? r.srcOffset : 0;
         const int srcY = direction == stitch::Direction::Vertical ? r.srcOffset : 0;
-        g.DrawImage(sources[i], Rect(r.x, r.y, r.w, r.h), srcX, srcY, r.w, r.h,
-                    UnitPixel);
+
+        if (scale < 1.0) {
+            const int destX = static_cast<int>(r.x * scale);
+            const int destY = static_cast<int>(r.y * scale);
+            const int destW = (std::max)(1, static_cast<int>(r.w * scale));
+            const int destH = (std::max)(1, static_cast<int>(r.h * scale));
+            g.DrawImage(sources[i], Rect(destX, destY, destW, destH), srcX, srcY, r.w, r.h,
+                        UnitPixel);
+        } else {
+            g.DrawImage(sources[i], Rect(r.x, r.y, r.w, r.h), srcX, srcY, r.w, r.h,
+                        UnitPixel);
+        }
     }
 
     return out.release();

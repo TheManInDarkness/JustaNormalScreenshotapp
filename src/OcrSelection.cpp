@@ -289,7 +289,8 @@ bool IsWideGlyph(const std::wstring& c) {
     if (c.size() != 1) return false;
     const wchar_t ch = c[0];
     return ch == L'm' || ch == L'M' || ch == L'w' || ch == L'W' ||
-           ch == L'@' || ch == L'%';
+           ch == L'@' || ch == L'%' || ch == L'&' || ch == L'#' ||
+           ch == L'\u2014';
 }
 
 }  // namespace

@@ -42,7 +42,7 @@ constexpr UINT kAutoSettleMs = 80;
 
 // Number of consecutive pulses where the screen did not move at all before
 // determining that the page has reached the end.
-constexpr int kMaxConsecutiveUnmoved = 2;
+constexpr int kMaxConsecutiveUnmoved = 5;
 
 // Session-scoped global hotkeys. Global rather than window-level because the
 // overlay never takes focus - the window being scrolled keeps it.
@@ -251,7 +251,7 @@ struct Session {
     int notches = 2;              // Wheel notches per pulse (reveals ~20-30% of viewport)
     int unmovedSteps = 0;         // Consecutive pulses where content did not move
     bool inputBlocked = false;    // True if SendInput failed (e.g. UIPI restriction)
-    DWORD autoIdleMs = 450;       // Safety timeout if window stops responding
+    DWORD autoIdleMs = 1000;      // Safety timeout if window stops responding
     DWORD lastProgressTick = 0;
     bool autoStarted = false;
     long long maxRows = 0;        // 0 = no limit (set from AppConfig at session start)
@@ -518,8 +518,9 @@ int CaptureStep(Session* s) {
         // In Auto Scroll, the controlled step advances ~15% to 50% of the viewport.
         // Constraining the search bounds ensures candidate overlaps cannot falsely
         // match sticky headers near the top or distant paragraphs far down the page.
+        // Max search fraction of 0.98 accommodates small steps on 4K / tall displays.
         matchOpt.minSearchFraction = 0.20;
-        matchOpt.maxSearchFraction = 0.95;
+        matchOpt.maxSearchFraction = 0.98;
     } else {
         matchOpt.minSearchFraction = 0.02;
         matchOpt.maxSearchFraction = 0.98;

@@ -53,6 +53,9 @@ struct StitchState {
     HWND canvas = nullptr;
     UINT dpi = 96;
     bool suppressPreview = false;
+    bool initializing = false;
+    int fullWidth = 0;
+    int fullHeight = 0;
     UINT_PTR debounceTimer = 0;  // non-zero when a preview rebuild is queued
 };
 
@@ -87,7 +90,7 @@ int CurrentGap(HWND dlg) {
 // collapse rapid changes (typing "10" in the gap box triggers two EN_CHANGE).
 void ScheduleRebuild(HWND dlg) {
     StitchState* st = GetState(dlg);
-    if (!st || st->suppressPreview) return;
+    if (!st || st->suppressPreview || st->initializing) return;
     if (st->debounceTimer) KillTimer(dlg, st->debounceTimer);
     st->debounceTimer = SetTimer(dlg, reinterpret_cast<UINT_PTR>(st), 80, nullptr);
 }
@@ -114,9 +117,13 @@ void LoadRecentCaptures(HWND dlg) {
     std::vector<std::wstring> recent = Utils::ListImagesInFolder(folder);
     Logger::Infof(L"LoadRecentCaptures: found %zu images in folder", recent.size());
 
+    // Replace the current list cleanly rather than stacking duplicates.
+    st->images.Clear();
+
     if (recent.size() > static_cast<size_t>(count)) {
         recent.resize(count);
     }
+    std::reverse(recent.begin(), recent.end());
 
     if (!recent.empty()) {
         st->suppressPreview = true;
@@ -130,31 +137,38 @@ void LoadRecentCaptures(HWND dlg) {
 
 void RebuildPreview(HWND dlg) {
     StitchState* st = GetState(dlg);
-    if (!st || st->suppressPreview) return;
+    if (!st || st->suppressPreview || st->initializing) return;
 
     const std::vector<Bitmap*> images = st->images.AllImages();
     if (images.empty()) {
         st->result.reset();
+        st->fullWidth = 0;
+        st->fullHeight = 0;
         ScrollableCanvas::SetImage(st->canvas, nullptr);
         SetWindowTextW(dlg, L"Stitch Images");
+        EnableWindow(GetDlgItem(dlg, IDC_STITCH_SAVE), FALSE);
+        EnableWindow(GetDlgItem(dlg, IDC_COPY_RESULT), FALSE);
         return;
     }
 
-    // Rebuilt from scratch on every option change: for the handful of images
-    // this dialog deals with it is fast enough that incremental updates would
-    // only add ways to get out of sync.
+    // Scale down previews exceeding 2,000 px to keep the UI snappy and
+    // prevent allocating hundreds of megabytes on the UI thread.
+    constexpr int kPreviewMaxDim = 2000;
     st->result.reset(ScrollStitcher::StitchManual(
         images, CurrentDirection(dlg), CurrentAlign(dlg), CurrentGap(dlg),
-        IsDlgButtonChecked(dlg, IDC_CHECK_OVERLAP) == BST_CHECKED));
+        IsDlgButtonChecked(dlg, IDC_CHECK_OVERLAP) == BST_CHECKED,
+        /*normalizeWidth=*/true, kPreviewMaxDim, &st->fullWidth, &st->fullHeight));
 
     ScrollableCanvas::SetImage(st->canvas, st->result.get());
 
     wchar_t title[128];
     if (st->result) {
+        const int dispW = st->fullWidth > 0 ? st->fullWidth : static_cast<int>(st->result->GetWidth());
+        const int dispH = st->fullHeight > 0 ? st->fullHeight : static_cast<int>(st->result->GetHeight());
         _snwprintf_s(title, ARRAYSIZE(title), _TRUNCATE,
-                     L"Stitch Images  —  %d image%s → %u × %u",
+                     L"Stitch Images  —  %d image%s → %d × %d",
                      static_cast<int>(images.size()), images.size() == 1 ? L"" : L"s",
-                     st->result->GetWidth(), st->result->GetHeight());
+                     dispW, dispH);
     } else {
         _snwprintf_s(title, ARRAYSIZE(title), _TRUNCATE,
                      L"Stitch Images  —  could not stitch these images");
@@ -207,16 +221,30 @@ void AddFilesViaDialog(HWND dlg) {
     ScheduleRebuild(dlg);
 }
 
+Bitmap* BuildFullResolutionResult(HWND dlg, StitchState* st) {
+    if (!st) return nullptr;
+    const std::vector<Bitmap*> images = st->images.AllImages();
+    if (images.empty()) return nullptr;
+
+    return ScrollStitcher::StitchManual(
+        images, CurrentDirection(dlg), CurrentAlign(dlg), CurrentGap(dlg),
+        IsDlgButtonChecked(dlg, IDC_CHECK_OVERLAP) == BST_CHECKED,
+        /*normalizeWidth=*/true, /*maxDimension=*/0);
+}
+
 void SaveResult(HWND dlg) {
     StitchState* st = GetState(dlg);
-    if (!st || !st->result) return;
+    if (!st || st->images.Count() == 0) return;
 
     const AppConfig& cfg = Settings::Get();
     const bool jpeg = cfg.imageFormat == ImageFormat::Jpeg;
 
+    std::wstring pattern = cfg.filenamePattern;
+    if (pattern.empty()) pattern = L"Screenshot_%Y-%m-%d_%H-%M-%S";
+
     wchar_t fileName[MAX_PATH] = {};
     const std::wstring suggested =
-        L"Stitched_" + Utils::ExpandFilenamePattern(L"%Y-%m-%d_%H-%M-%S") +
+        L"Stitched_" + Utils::ExpandFilenamePattern(pattern) +
         (jpeg ? L".jpg" : L".png");
     wcsncpy_s(fileName, suggested.c_str(), _TRUNCATE);
 
@@ -236,7 +264,16 @@ void SaveResult(HWND dlg) {
 
     if (!GetSaveFileNameW(&ofn)) return;
 
-    if (Utils::SaveBitmapToFile(st->result.get(), fileName, cfg.jpegQuality)) {
+    HCURSOR prevCursor = SetCursor(LoadCursorW(nullptr, IDC_WAIT));
+    std::unique_ptr<Bitmap> full(BuildFullResolutionResult(dlg, st));
+    SetCursor(prevCursor);
+    if (!full) {
+        MessageBoxW(dlg, L"The stitched image could not be created.", L"Stitch Images",
+                    MB_OK | MB_ICONERROR);
+        return;
+    }
+
+    if (Utils::SaveBitmapToFile(full.get(), fileName, cfg.jpegQuality)) {
         const std::wstring path = fileName;
         // Saved into the capture folder, it belongs in the main window's
         // list straight away.
@@ -252,9 +289,14 @@ void SaveResult(HWND dlg) {
 
 void CopyResult(HWND dlg) {
     StitchState* st = GetState(dlg);
-    if (!st || !st->result) return;
+    if (!st || st->images.Count() == 0) return;
 
-    if (Clipboard::CopyBitmap(st->result.get())) {
+    HCURSOR prevCursor = SetCursor(LoadCursorW(nullptr, IDC_WAIT));
+    std::unique_ptr<Bitmap> full(BuildFullResolutionResult(dlg, st));
+    SetCursor(prevCursor);
+    if (!full) return;
+
+    if (Clipboard::CopyBitmap(full.get())) {
         Toast::Show(L"Copied", L"The stitched image is on the clipboard.");
     } else {
         MessageBoxW(dlg, L"The stitched image could not be copied.", L"Stitch Images",
@@ -276,6 +318,7 @@ INT_PTR CALLBACK DialogProc(HWND dlg, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_INITDIALOG: {
             StitchState* fresh = new StitchState();
+            fresh->initializing = true;
             SetWindowLongPtrW(dlg, DWLP_USER, reinterpret_cast<LONG_PTR>(fresh));
             fresh->dpi = Utils::GetDpiForWindowSafe(dlg);
 
@@ -295,17 +338,8 @@ INT_PTR CALLBACK DialogProc(HWND dlg, UINT msg, WPARAM wParam, LPARAM lParam) {
             Theme::ApplyToControls(dlg);
             fresh->layout.Initialize(dlg, kAnchors, ARRAYSIZE(kAnchors));
 
-            // Only what the caller asked for. Preloading recent captures
-            // meant merely opening the tool stitched every one of them into
-            // a single enormous composite (8 screenshots => 1920x38041,
-            // ~500MB) that the user never asked for.
             const std::vector<std::wstring>* initial =
                 reinterpret_cast<const std::vector<std::wstring>*>(lParam);
-            if (initial && !initial->empty()) {
-                fresh->suppressPreview = true;
-                for (const auto& f : *initial) fresh->images.AddFile(f);
-                fresh->suppressPreview = false;
-            }
 
             // Restore auto-load checkbox state and cap from config.
             const AppConfig& cfg = Settings::Get();
@@ -314,24 +348,27 @@ INT_PTR CALLBACK DialogProc(HWND dlg, UINT msg, WPARAM wParam, LPARAM lParam) {
             SetDlgItemInt(dlg, IDC_EDIT_RECENT_COUNT,
                           static_cast<UINT>(cfg.stitchRecentCount), FALSE);
 
-            Logger::Infof(L"StitchTool init: autoLoadRecent=%d, initialFiles=%zu",
-                          cfg.stitchAutoLoadRecent, initial ? initial->size() : 0);
-
-            // Auto-load recent captures if the user opted in. Uses batch-add
-            // to avoid O(n^2) thumbnail regeneration during load.
-            if (cfg.stitchAutoLoadRecent && (!initial || initial->empty())) {
-                Logger::Info(L"StitchTool init: triggering auto-load");
+            // If the user explicitly selected multiple files in the gallery, use those.
+            // Otherwise, if auto-load is enabled, load the recent captures.
+            if (initial && initial->size() > 1) {
+                fresh->suppressPreview = true;
+                for (const auto& f : *initial) fresh->images.AddFile(f);
+                fresh->suppressPreview = false;
+            } else if (cfg.stitchAutoLoadRecent) {
                 LoadRecentCaptures(dlg);
-            } else {
-                Logger::Info(L"StitchTool init: skipping auto-load (disabled or initial files provided)");
+            } else if (initial && !initial->empty()) {
+                fresh->suppressPreview = true;
+                for (const auto& f : *initial) fresh->images.AddFile(f);
+                fresh->suppressPreview = false;
             }
 
+            fresh->initializing = false;
             RebuildPreview(dlg);
             return TRUE;
         }
 
         case WM_COMMAND: {
-            if (!st) break;
+            if (!st || st->initializing) break;
             const int id = LOWORD(wParam);
             const int code = HIWORD(wParam);
 
@@ -367,12 +404,10 @@ INT_PTR CALLBACK DialogProc(HWND dlg, UINT msg, WPARAM wParam, LPARAM lParam) {
                     Settings::Save();
                     Logger::Infof(L"Checkbox toggled: autoLoadRecent=%d, imageCount=%d",
                                   cfg.stitchAutoLoadRecent, st->images.Count());
-                    if (cfg.stitchAutoLoadRecent && st->images.Count() == 0) {
-                        Logger::Info(L"Checkbox toggled on: triggering immediate load");
+                    if (cfg.stitchAutoLoadRecent) {
+                        st->images.Clear();
                         LoadRecentCaptures(dlg);
                         ScheduleRebuild(dlg);
-                    } else if (cfg.stitchAutoLoadRecent && st->images.Count() > 0) {
-                        Logger::Info(L"Checkbox toggled on but list not empty: skipping load");
                     }
                     return TRUE;
                 }
@@ -387,6 +422,11 @@ INT_PTR CALLBACK DialogProc(HWND dlg, UINT msg, WPARAM wParam, LPARAM lParam) {
                             AppConfig& cfg = Settings::Get();
                             cfg.stitchRecentCount = count;
                             Settings::Save();
+                            if (cfg.stitchAutoLoadRecent) {
+                                st->images.Clear();
+                                LoadRecentCaptures(dlg);
+                                ScheduleRebuild(dlg);
+                            }
                         }
                     }
                     return TRUE;

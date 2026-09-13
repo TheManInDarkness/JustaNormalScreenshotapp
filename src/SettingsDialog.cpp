@@ -70,6 +70,20 @@ int MeasuredLineHeight(UINT dpi) {
               : Dpi::Scale(kLineH, dpi);
 }
 
+int MeasureTextHeight(HWND dlg, const wchar_t* text, int widthPx, HFONT font) {
+    if (!text || !text[0]) return 0;
+    HDC hdc = GetDC(dlg);
+    if (!hdc) return 0;
+    HGDIOBJ oldFont = font ? SelectObject(hdc, font) : nullptr;
+
+    RECT rc = {0, 0, widthPx, 0};
+    DrawTextW(hdc, text, -1, &rc, DT_CALCRECT | DT_WORDBREAK | DT_EXPANDTABS);
+
+    if (oldFont) SelectObject(hdc, oldFont);
+    ReleaseDC(dlg, hdc);
+    return rc.bottom - rc.top;
+}
+
 HWND MakeControl(HWND dlg, SettingsState* st, int tab, const wchar_t* cls,
                  const wchar_t* text, DWORD style, int x, int y, int w, int h, int id,
                  DWORD exStyle = 0) {
@@ -139,7 +153,7 @@ void BuildHotkeysTab(HWND dlg, SettingsState* st) {
         MakeControl(dlg, st, TabHotkeys, L"STATIC", row.label, SS_LEFT, 16, y + 4, 160,
                     kLineH, IDC_STATIC);
         HWND hk = MakeControl(dlg, st, TabHotkeys, HOTKEY_CLASSW, L"",
-                              WS_TABSTOP | WS_BORDER, 182, y, 140, kEditH, row.id);
+                              WS_TABSTOP | WS_BORDER, 182, y, 160, kEditH, row.id);
         if (hk) {
             SendMessageW(hk, HKM_SETHOTKEY, ToHotkeyControlValue(*row.binding), 0);
             // Bare keys and plain Shift combinations are too easy to trigger
@@ -150,39 +164,48 @@ void BuildHotkeysTab(HWND dlg, SettingsState* st) {
         y += kEditH + 12;
     }
 
-    MakeControl(dlg, st, TabHotkeys, L"STATIC",
-                L"Both capture keys do the same thing: dim the screen and let you drag "
-                L"out a region. Two are offered because Windows' own snipping tool "
-                L"usually owns Print Screen, and a hotkey another app has already "
-                L"claimed cannot be registered.\n\n"
-                L"\"Stop auto scroll\" ends an \"I'll scroll it for me\" session early "
-                L"— the capture so far is stitched and saved as normal.",
-                SS_LEFT, 16, y + 10, 330, kLineH * 6, IDC_STATIC_HOTKEY_WARN);
+    const wchar_t* warnText =
+        L"Both capture keys do the same thing: dim the screen and let you drag "
+        L"out a region. Two are offered because Windows' own snipping tool "
+        L"usually owns Print Screen, and a hotkey another app has already "
+        L"claimed cannot be registered.\n\n"
+        L"\"Stop auto scroll\" ends an \"I'll scroll it for me\" session early "
+        L"— the capture so far is stitched and saved as normal.";
+    const int textW = 350;
+    HFONT font = Dpi::GetUiFont(st->dpi);
+    int warnH = MeasureTextHeight(dlg, warnText, Dpi::Scale(textW, st->dpi), font);
+    int warnH96 = MulDiv(warnH, 96, st->dpi) + 4;
+    MakeControl(dlg, st, TabHotkeys, L"STATIC", warnText, SS_LEFT, 16, y + 10,
+                textW, warnH96, IDC_STATIC_HOTKEY_WARN);
 }
 
 // ---------------------------------------------------------------- output --
 void BuildOutputTab(HWND dlg, SettingsState* st) {
-    // Saving is not optional: the main window lists this folder, so a
-    // capture that was never written would vanish the moment it was taken.
     int y = 14;
-    MakeControl(dlg, st, TabOutput, L"STATIC",
-                L"Every capture is saved to the folder below and appears in the main "
-                L"window.",
-                SS_LEFT, 16, y, 330, kLineH * 2, IDC_STATIC);
-    y += kLineH * 2 + kRowGap;
+    const int textW = 350;
+    HFONT font = Dpi::GetUiFont(st->dpi);
+
+    const wchar_t* intro =
+        L"Every capture is saved to the folder below and appears in the main "
+        L"window.";
+    int introH = MeasureTextHeight(dlg, intro, Dpi::Scale(textW, st->dpi), font);
+    int introH96 = MulDiv(introH, 96, st->dpi) + 2;
+    MakeControl(dlg, st, TabOutput, L"STATIC", intro, SS_LEFT, 16, y, textW, introH96,
+                IDC_STATIC);
+    y += introH96 + kRowGap;
 
     MakeControl(dlg, st, TabOutput, L"BUTTON", L"Also copy each capture to the clipboard",
-                BS_AUTOCHECKBOX | WS_TABSTOP, 16, y, 300, kCheckH, IDC_CHK_COPY);
+                BS_AUTOCHECKBOX | WS_TABSTOP, 16, y, 320, kCheckH, IDC_CHK_COPY);
     y += kCheckH + kRowGap * 2;
 
     MakeControl(dlg, st, TabOutput, L"STATIC", L"Save folder:", SS_LEFT, 16, y, 100,
                 kLineH, IDC_STATIC);
     y += kLineH + 2;
     MakeControl(dlg, st, TabOutput, L"EDIT", L"",
-                WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL, 16, y, 250, kEditH,
+                WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL, 16, y, 266, kEditH,
                 IDC_EDIT_FOLDER, WS_EX_CLIENTEDGE);
     MakeControl(dlg, st, TabOutput, L"BUTTON", L"Browse...", WS_TABSTOP | BS_PUSHBUTTON,
-                274, y - 2, 72, kButtonH, IDC_BTN_BROWSE_FOLDER);
+                290, y - 2, 76, kButtonH, IDC_BTN_BROWSE_FOLDER);
     y += kEditH + kRowGap * 2;
 
     const int rightCol = 200;
@@ -196,7 +219,7 @@ void BuildOutputTab(HWND dlg, SettingsState* st) {
                 WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL, 16, y, 170, kEditH,
                 IDC_EDIT_PATTERN, WS_EX_CLIENTEDGE);
     HWND combo = MakeControl(dlg, st, TabOutput, L"COMBOBOX", L"",
-                             WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, rightCol, y, 146,
+                             WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, rightCol, y, 166,
                              140, IDC_COMBO_FORMAT);
     if (combo) {
         ComboBox_AddString(combo, L"PNG (lossless)");
@@ -206,83 +229,87 @@ void BuildOutputTab(HWND dlg, SettingsState* st) {
 
     MakeControl(dlg, st, TabOutput, L"STATIC",
                 L"%Y year   %m month   %d day   %H hour   %M minute   %S second",
-                SS_LEFT, 16, y, 170, kLineH * 2, IDC_STATIC);
+                SS_LEFT, 16, y, 180, kLineH * 2, IDC_STATIC);
 
-    // JPEG quality was honoured everywhere in code but had no control, so it
-    // could only be changed by hand-editing config.json.
     MakeControl(dlg, st, TabOutput, L"STATIC", L"JPEG quality (1-100):", SS_LEFT,
-                rightCol, y + 2, 110, kLineH, IDC_STATIC_QUALITY);
+                rightCol, y + 2, 116, kLineH, IDC_STATIC_QUALITY);
     MakeControl(dlg, st, TabOutput, L"EDIT", L"", WS_TABSTOP | WS_BORDER | ES_NUMBER,
-                rightCol + 112, y, 44, kEditH, IDC_EDIT_QUALITY, WS_EX_CLIENTEDGE);
+                rightCol + 120, y, 46, kEditH, IDC_EDIT_QUALITY, WS_EX_CLIENTEDGE);
 }
 
 // --------------------------------------------------------------- capture --
 void BuildCaptureTab(HWND dlg, SettingsState* st) {
-    int y = 16;
+    int y = 14;
+    HFONT font = Dpi::GetUiFont(st->dpi);
+    const int textW = 350;
+
     MakeControl(dlg, st, TabCapture, L"BUTTON", L"Include the mouse cursor",
                 BS_AUTOCHECKBOX | WS_TABSTOP, 16, y, 260, kCheckH, IDC_CHK_CURSOR);
-    y += kCheckH + kRowGap * 2;
+    y += kCheckH + kRowGap;
 
     MakeControl(dlg, st, TabCapture, L"STATIC", L"Delay before capturing (ms):", SS_LEFT,
                 16, y + 3, 180, kLineH, IDC_STATIC);
     MakeControl(dlg, st, TabCapture, L"EDIT", L"", WS_TABSTOP | WS_BORDER | ES_NUMBER,
                 200, y, 70, kEditH, IDC_EDIT_DELAY, WS_EX_CLIENTEDGE);
-    y += kEditH + kRowGap;
+    y += kEditH + 3;
 
-    MakeControl(dlg, st, TabCapture, L"STATIC",
-                L"A delay gives menus and tooltips time to appear before the shot is "
-                L"taken.",
-                SS_LEFT, 16, y, 330, kLineH * 2, IDC_STATIC);
-    y += kLineH * 2 + kRowGap * 2;
+    const wchar_t* delayHelp =
+        L"A delay gives menus and tooltips time to appear before the shot is taken.";
+    int delayH = MeasureTextHeight(dlg, delayHelp, Dpi::Scale(textW, st->dpi), font);
+    int delayH96 = MulDiv(delayH, 96, st->dpi) + 2;
+    MakeControl(dlg, st, TabCapture, L"STATIC", delayHelp, SS_LEFT, 16, y, textW, delayH96,
+                IDC_STATIC);
+    y += delayH96 + kRowGap + 2;
 
-    MakeControl(dlg, st, TabCapture, L"STATIC",
-                L"Stop auto scroll after idle (ms):", SS_LEFT, 16, y + 3, 180, kLineH,
-                IDC_STATIC_SETTLE);
+    MakeControl(dlg, st, TabCapture, L"STATIC", L"Stop auto scroll after idle (ms):", SS_LEFT,
+                16, y + 3, 180, kLineH, IDC_STATIC_SETTLE);
     MakeControl(dlg, st, TabCapture, L"EDIT", L"", WS_TABSTOP | WS_BORDER | ES_NUMBER,
                 200, y, 70, kEditH, IDC_EDIT_SETTLE, WS_EX_CLIENTEDGE);
-    y += kEditH + kRowGap;
+    y += kEditH + 3;
 
-    MakeControl(dlg, st, TabCapture, L"STATIC",
-                L"How long \"scroll it for me\" keeps turning the wheel with nothing "
-                L"new appearing before it decides the page has ended. Raise it for a "
-                L"slow page that stalls part-way down.",
-                SS_LEFT, 16, y, 330, kLineH * 3, IDC_STATIC);
-    y += kLineH * 3 + kRowGap * 2;
+    const wchar_t* idleHelp =
+        L"How long \"scroll it for me\" keeps turning the wheel with nothing new appearing "
+        L"before it decides the page has ended. Raise it for a slow page that stalls part-way down.";
+    int idleH = MeasureTextHeight(dlg, idleHelp, Dpi::Scale(textW, st->dpi), font);
+    int idleH96 = MulDiv(idleH, 96, st->dpi) + 2;
+    MakeControl(dlg, st, TabCapture, L"STATIC", idleHelp, SS_LEFT, 16, y, textW, idleH96,
+                IDC_STATIC);
+    y += idleH96 + kRowGap + 2;
 
     MakeControl(dlg, st, TabCapture, L"BUTTON",
                 L"Keep scrolling until I press the stop key (no idle timeout)",
-                BS_AUTOCHECKBOX | WS_TABSTOP, 16, y, 330, kCheckH,
-                IDC_CHK_NO_IDLE_STOP);
-    y += kCheckH + kRowGap;
+                BS_AUTOCHECKBOX | WS_TABSTOP, 16, y, 350, kCheckH, IDC_CHK_NO_IDLE_STOP);
+    y += kCheckH + 3;
 
-    MakeControl(dlg, st, TabCapture, L"STATIC",
-                L"When ticked, auto-scroll never decides the page has ended on its "
-                L"own — it only stops when you press the stop hotkey, the height "
-                L"limit is reached, or you cancel. Useful for pages with long "
-                L"unchanging stretches (lazy gaps, sticky headers, non-scrolling "
-                L"targets). Use with care: a genuinely endless page will scroll "
-                L"forever.",
-                SS_LEFT, 16, y, 330, kLineH * 4, IDC_STATIC_NO_IDLE_WARN);
-    y += kLineH * 4 + kRowGap * 2;
+    const wchar_t* noIdleWarn =
+        L"When ticked, auto-scroll never decides the page has ended on its own — "
+        L"it only stops when you press the stop hotkey, the height limit is reached, "
+        L"or you cancel. Useful for pages with long unchanging stretches (lazy gaps, sticky headers).";
+    int noIdleH = MeasureTextHeight(dlg, noIdleWarn, Dpi::Scale(textW, st->dpi), font);
+    int noIdleH96 = MulDiv(noIdleH, 96, st->dpi) + 2;
+    MakeControl(dlg, st, TabCapture, L"STATIC", noIdleWarn, SS_LEFT, 16, y, textW, noIdleH96,
+                IDC_STATIC_NO_IDLE_WARN);
+    y += noIdleH96 + kRowGap + 2;
 
     MakeControl(dlg, st, TabCapture, L"BUTTON",
                 L"No height limit (capture until I stop it)",
-                BS_AUTOCHECKBOX | WS_TABSTOP, 16, y, 330, kCheckH,
-                IDC_CHK_NO_HEIGHT_LIMIT);
-    y += kCheckH + kRowGap;
+                BS_AUTOCHECKBOX | WS_TABSTOP, 16, y, 350, kCheckH, IDC_CHK_NO_HEIGHT_LIMIT);
+    y += kCheckH + 4;
 
-    MakeControl(dlg, st, TabCapture, L"STATIC", L"Max height (pixels):",
-                SS_LEFT, 16, y + 4, 120, kLineH, IDC_STATIC_MAX_ROWS);
+    MakeControl(dlg, st, TabCapture, L"STATIC", L"Max height (pixels):", SS_LEFT,
+                16, y + 3, 120, kLineH, IDC_STATIC_MAX_ROWS);
     MakeControl(dlg, st, TabCapture, L"EDIT", L"", WS_TABSTOP | WS_BORDER | ES_NUMBER,
                 200, y, 70, kEditH, IDC_EDIT_MAX_ROWS, WS_EX_CLIENTEDGE);
-    y += kEditH + kRowGap;
+    y += kEditH + 3;
 
-    MakeControl(dlg, st, TabCapture, L"STATIC",
-                L"By default, a capture is forced to stop at 60000 pixels tall to "
-                L"prevent runaway composites. Tick the box above to remove this "
-                L"limit — useful for very long pages. Unticked, the edit box sets "
-                L"the cap (1000–500000 pixels).",
-                SS_LEFT, 16, y, 330, kLineH * 4, IDC_STATIC);
+    const wchar_t* maxRowsHelp =
+        L"By default, a capture is forced to stop at 60000 pixels tall to prevent "
+        L"runaway composites. Tick the box above to remove this limit — useful for very "
+        L"long pages. Unticked, the edit box sets the cap (1000–500000 pixels).";
+    int maxRowsH = MeasureTextHeight(dlg, maxRowsHelp, Dpi::Scale(textW, st->dpi), font);
+    int maxRowsH96 = MulDiv(maxRowsH, 96, st->dpi) + 2;
+    MakeControl(dlg, st, TabCapture, L"STATIC", maxRowsHelp, SS_LEFT, 16, y, textW, maxRowsH96,
+                IDC_STATIC);
 }
 
 // ------------------------------------------------------------------- pdf --
@@ -305,14 +332,17 @@ HWND MakeChoice(HWND dlg, SettingsState* st, int tab, const wchar_t* label, int 
 
 void BuildPdfTab(HWND dlg, SettingsState* st) {
     int y = 14;
+    HFONT font = Dpi::GetUiFont(st->dpi);
+    const int textW = 350;
+
     MakeControl(dlg, st, TabPdf, L"BUTTON",
                 L"Also make a PDF of every long (scroll) capture",
-                BS_AUTOCHECKBOX | WS_TABSTOP, 16, y, 330, kCheckH, IDC_CHK_AUTO_PDF);
-    y += kCheckH + kRowGap * 2;
+                BS_AUTOCHECKBOX | WS_TABSTOP, 16, y, 350, kCheckH, IDC_CHK_AUTO_PDF);
+    y += kCheckH + kRowGap + 2;
 
     const int labelW = 110;
     const int comboX = 132;
-    const int comboW = 214;
+    const int comboW = 226;
     const int rowStep = kEditH + kRowGap + 2;
 
     MakeChoice(dlg, st, TabPdf, L"Page layout:", y, labelW, comboX, comboW,
@@ -334,47 +364,54 @@ void BuildPdfTab(HWND dlg, SettingsState* st) {
     y += rowStep;
 
     MakeControl(dlg, st, TabPdf, L"EDIT", L"", WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL,
-                comboX, y, 140, kEditH, IDC_EDIT_PDF_FOLDER, WS_EX_CLIENTEDGE);
+                comboX, y, 150, kEditH, IDC_EDIT_PDF_FOLDER, WS_EX_CLIENTEDGE);
     MakeControl(dlg, st, TabPdf, L"BUTTON", L"Browse...", WS_TABSTOP | BS_PUSHBUTTON,
-                278, y - 2, 68, kButtonH, IDC_BTN_PDF_BROWSE);
-    y += kEditH + kRowGap * 2;
+                290, y - 2, 68, kButtonH, IDC_BTN_PDF_BROWSE);
+    y += kEditH + kRowGap + 4;
 
-    MakeControl(dlg, st, TabPdf, L"STATIC",
-                L"A long page keeps the capture in one piece; splitting can cut "
-                L"mid-sentence. Only images are listed in the main window, so "
-                L"\"only the PDF\" keeps the capture out of that list.",
-                SS_LEFT, 16, y, 330, kLineH * 3, IDC_STATIC);
+    const wchar_t* pdfHelp =
+        L"A long page keeps the capture in one piece; splitting can cut "
+        L"mid-sentence. Only images are listed in the main window, so "
+        L"\"only the PDF\" keeps the capture out of that list.";
+    int pdfH = MeasureTextHeight(dlg, pdfHelp, Dpi::Scale(textW, st->dpi), font);
+    int pdfH96 = MulDiv(pdfH, 96, st->dpi) + 2;
+    MakeControl(dlg, st, TabPdf, L"STATIC", pdfHelp, SS_LEFT, 16, y, textW, pdfH96,
+                IDC_STATIC);
 }
 
 // --------------------------------------------------------------- general --
 void BuildGeneralTab(HWND dlg, SettingsState* st) {
-    int y = 16;
+    int y = 14;
     const int step = kCheckH + kRowGap;
     MakeControl(dlg, st, TabGeneral, L"BUTTON", L"Start with Windows",
-                BS_AUTOCHECKBOX | WS_TABSTOP, 16, y, 300, kCheckH, IDC_CHK_STARTUP);
+                BS_AUTOCHECKBOX | WS_TABSTOP, 16, y, 320, kCheckH, IDC_CHK_STARTUP);
     y += step;
     MakeControl(dlg, st, TabGeneral, L"BUTTON", L"Show notifications",
-                BS_AUTOCHECKBOX | WS_TABSTOP, 16, y, 300, kCheckH, IDC_CHK_NOTIFICATIONS);
+                BS_AUTOCHECKBOX | WS_TABSTOP, 16, y, 320, kCheckH, IDC_CHK_NOTIFICATIONS);
     y += step;
     MakeControl(dlg, st, TabGeneral, L"BUTTON", L"Follow the system light/dark theme",
-                BS_AUTOCHECKBOX | WS_TABSTOP, 16, y, 300, kCheckH, IDC_CHK_FOLLOW_THEME);
+                BS_AUTOCHECKBOX | WS_TABSTOP, 16, y, 320, kCheckH, IDC_CHK_FOLLOW_THEME);
     y += step;
     MakeControl(dlg, st, TabGeneral, L"BUTTON",
                 L"Start in the notification area (no window)",
-                BS_AUTOCHECKBOX | WS_TABSTOP, 16, y, 300, kCheckH,
+                BS_AUTOCHECKBOX | WS_TABSTOP, 16, y, 320, kCheckH,
                 IDC_CHK_START_MINIMIZED);
     y += step + kRowGap;
 
     MakeControl(dlg, st, TabGeneral, L"BUTTON", L"Open log folder",
                 WS_TABSTOP | BS_PUSHBUTTON, 16, y, 130, kButtonH, IDC_BTN_OPEN_LOGS);
-    y += kButtonH + kRowGap;
+    y += kButtonH + kRowGap + 4;
 
-    wchar_t info[512];
+    wchar_t info[1024];
     _snwprintf_s(info, ARRAYSIZE(info), _TRUNCATE,
-                 L"Settings: %s\nLog: %s\nCrash reports: %s",
+                 L"Settings:\n%s\n\nLog:\n%s\n\nCrash reports:\n%s",
                  AppPaths::GetConfigFilePath().c_str(), Logger::GetLogFilePath().c_str(),
                  CrashHandler::GetDumpFolder().c_str());
-    MakeControl(dlg, st, TabGeneral, L"STATIC", info, SS_LEFT, 16, y, 330, kLineH * 3,
+    HFONT font = Dpi::GetUiFont(st->dpi);
+    const int textW = 350;
+    int infoH = MeasureTextHeight(dlg, info, Dpi::Scale(textW, st->dpi), font);
+    int infoH96 = MulDiv(infoH, 96, st->dpi) + 4;
+    MakeControl(dlg, st, TabGeneral, L"STATIC", info, SS_LEFT, 16, y, textW, infoH96,
                 IDC_STATIC);
 }
 
@@ -749,8 +786,20 @@ INT_PTR CALLBACK DialogProc(HWND dlg, UINT msg, WPARAM wParam, LPARAM lParam) {
             return FALSE;
         }
 
+        case WM_CTLCOLORSTATIC: {
+            if (Theme::IsDark()) {
+                HBRUSH brush = Theme::OnCtlColor(reinterpret_cast<HDC>(wParam), msg);
+                if (brush) return reinterpret_cast<INT_PTR>(brush);
+            } else {
+                HDC hdc = reinterpret_cast<HDC>(wParam);
+                SetBkMode(hdc, TRANSPARENT);
+                SetTextColor(hdc, Theme::Current().text);
+                return reinterpret_cast<INT_PTR>(GetStockObject(WHITE_BRUSH));
+            }
+            return FALSE;
+        }
+
         case WM_CTLCOLORDLG:
-        case WM_CTLCOLORSTATIC:
         case WM_CTLCOLORBTN:
         case WM_CTLCOLOREDIT:
         case WM_CTLCOLORLISTBOX: {

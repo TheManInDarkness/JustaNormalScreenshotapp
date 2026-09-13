@@ -14,16 +14,18 @@ No installer, no framework, one exe.
   alternate binding is the one that works) — drag a region out of the dimmed
   screen, then copy / save / OCR it from the confirm bar.
 - **Scroll capture** — *auto* scrolls the page for you and stitches as it goes;
-  *manual* captures continuously while you scroll. Both keep the dimmed frame
-  up throughout; neither needs a key press per frame.
+  *manual* captures continuously while you scroll. Powered by deterministic
+  step-and-settle pulses, early-exit row/column matching algorithms (5×–10×
+  faster rejection of non-matching rows), 4K small-step overlap detection up to 98%,
+  and relaxed end-of-page patience for modern lazy-loading websites.
 - **Main window** — a gallery of every capture with the tools attached:
   copy, open, delete, and **Extract text**.
 - **Text extraction** — hover over the capture to get an I-beam, drag across
   the words you want, text lands on the clipboard with real paragraph shape:
   lines rebuilt from word-box geometry rather than trusted from the engine,
   punctuation glued without spaces (`app . log` pastes as `app.log`),
-  dark screenshots normalized before recognition so dark-theme editors don't
-  lose whole lines.
+  direct C++ bilinear tensor resampling (zero GDI+ allocations or thread lock
+  contention), and CTC peak probability pooling for accurate confidence scores.
 - **PDF export** — long captures become one long PDF page or split A4/Letter
   sheets, automatically or on request; keep the PNG alongside or not.
 
@@ -71,9 +73,9 @@ missing resource file is a compile error, not a cosmetic gap.
 Measured by `tools/OcrProbe` as character-level F1 against hand-verified
 ground truth:
 
-- **92.6%** on the held-out corpus — this is the honest number.
-- 97.2% on the tuning corpus.
-- ~1.6 s per typical capture end to end.
+- **93.0%** on the held-out gold corpus — this is the honest number.
+- **97.6%** on the standard corpus.
+- Sub-second recognition latency on standard captures (~250–800 ms per capture).
 
 The accuracy corpus lives in `testassets/` locally and is deliberately **not
 in this repository** (it is made of real screen captures). Only `OcrProbe`

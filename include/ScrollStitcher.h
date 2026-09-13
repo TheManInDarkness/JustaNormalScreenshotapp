@@ -27,9 +27,14 @@ Gdiplus::Bitmap* StitchScrollFrames(const std::vector<Gdiplus::Bitmap*>& strips,
 
 // Manual layout for the standalone Stitch Tool: explicit direction,
 // alignment and gap, with optional overlap removal between adjacent images.
+// If `maxDimension` > 0 and the result exceeds it, produces a scaled preview
+// and optionally reports the unscaled dimensions via `outFullWidth` / `outFullHeight`.
 Gdiplus::Bitmap* StitchManual(const std::vector<Gdiplus::Bitmap*>& images,
                               stitch::Direction direction, stitch::Align align,
                               int gap, bool removeOverlap,
-                              bool normalizeWidth = true);
+                              bool normalizeWidth = true,
+                              int maxDimension = 0,
+                              int* outFullWidth = nullptr,
+                              int* outFullHeight = nullptr);
 
 }  // namespace ScrollStitcher

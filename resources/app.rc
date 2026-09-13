@@ -45,14 +45,14 @@ END
 // Dialogs
 /////////////////////////////////////////////////////////////////////////////
 
-IDD_SETTINGS DIALOGEX 0, 0, 350, 250
+IDD_SETTINGS DIALOGEX 0, 0, 390, 310
 STYLE DS_MODALFRAME | DS_SETFONT | WS_POPUP | WS_CAPTION | WS_SYSMENU
 CAPTION "Screenshot App Settings"
 FONT 9, "Segoe UI", 400, 0, 0x1
 BEGIN
-    CONTROL         "", IDC_TAB, WC_TABCONTROL, WS_TABSTOP, 8, 8, 334, 206
-    DEFPUSHBUTTON   "OK", IDOK, 232, 224, 52, 16
-    PUSHBUTTON      "Cancel", IDCANCEL, 290, 224, 52, 16
+    CONTROL         "", IDC_TAB, WC_TABCONTROL, WS_TABSTOP, 8, 8, 374, 268
+    DEFPUSHBUTTON   "OK", IDOK, 272, 284, 52, 16
+    PUSHBUTTON      "Cancel", IDCANCEL, 330, 284, 52, 16
 END
 
 // Controls inside the tab pages are created programmatically by

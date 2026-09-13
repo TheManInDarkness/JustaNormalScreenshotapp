@@ -507,6 +507,71 @@ struct Line {
     double pixelsPerColumn = 0;
 };
 
+// Direct bilinear resampling from src BGRA crop into normalized RGB planar float tensor.
+// Eliminates GDI+ Bitmap/Graphics allocations and multi-threaded lock contention.
+void SampleCropBilinear(const Img& src, const Box& box, int resizedW, int targetW, int targetH,
+                        std::vector<float>& outTensor) {
+    outTensor.assign(static_cast<size_t>(3) * targetH * targetW, 0.0f);
+    const size_t plane = static_cast<size_t>(targetH) * targetW;
+
+    const double scaleX = static_cast<double>(box.w) / resizedW;
+    const double scaleY = static_cast<double>(box.h) / targetH;
+
+    for (int y = 0; y < targetH; ++y) {
+        // Pixel center mapping with edge clamping
+        const double srcY =
+            (std::max)(0.0, (std::min)(static_cast<double>(box.h - 1),
+                                       (y + 0.5) * scaleY - 0.5));
+        const int y0 = static_cast<int>(srcY);
+        const int y1 = (std::min)(y0 + 1, box.h - 1);
+        const float fy = static_cast<float>(srcY - y0);
+        const float invFy = 1.0f - fy;
+
+        const size_t row0Offset =
+            (static_cast<size_t>(box.y + y0) * src.w + box.x) * 4;
+        const size_t row1Offset =
+            (static_cast<size_t>(box.y + y1) * src.w + box.x) * 4;
+        const uint8_t* row0 = src.bgra.data() + row0Offset;
+        const uint8_t* row1 = src.bgra.data() + row1Offset;
+
+        const size_t rowBase = static_cast<size_t>(y) * targetW;
+
+        for (int x = 0; x < resizedW; ++x) {
+            const double srcX =
+                (std::max)(0.0, (std::min)(static_cast<double>(box.w - 1),
+                                           (x + 0.5) * scaleX - 0.5));
+            const int x0 = static_cast<int>(srcX);
+            const int x1 = (std::min)(x0 + 1, box.w - 1);
+            const float fx = static_cast<float>(srcX - x0);
+            const float invFx = 1.0f - fx;
+
+            const float w00 = invFx * invFy;
+            const float w10 = fx * invFy;
+            const float w01 = invFx * fy;
+            const float w11 = fx * fy;
+
+            const uint8_t* p00 = row0 + x0 * 4;
+            const uint8_t* p10 = row0 + x1 * 4;
+            const uint8_t* p01 = row1 + x0 * 4;
+            const uint8_t* p11 = row1 + x1 * 4;
+
+            // BGRA: p[0] is Blue, p[1] is Green, p[2] is Red
+            const float b =
+                w00 * p00[0] + w10 * p10[0] + w01 * p01[0] + w11 * p11[0];
+            const float g =
+                w00 * p00[1] + w10 * p10[1] + w01 * p01[1] + w11 * p11[1];
+            const float r =
+                w00 * p00[2] + w10 * p10[2] + w01 * p01[2] + w11 * p11[2];
+
+            // SVTR [-1, 1] normalization: (val / 255.0 - 0.5) / 0.5 = val / 127.5 - 1.0
+            const size_t base = rowBase + x;
+            outTensor[base] = r / 127.5f - 1.0f;
+            outTensor[plane + base] = g / 127.5f - 1.0f;
+            outTensor[2 * plane + base] = b / 127.5f - 1.0f;
+        }
+    }
+}
+
 bool RecognizeOne(Engine& e, const Img& src, const Box& box, Line* line,
                   bool heavy = false) {
     Session& recSession = heavy ? e.recHeavy : e.rec;
@@ -521,19 +586,8 @@ bool RecognizeOne(Engine& e, const Img& src, const Box& box, Line* line,
         return false;
     }
 
-    Img crop;
-    crop.w = box.w;
-    crop.h = box.h;
-    crop.bgra.resize(static_cast<size_t>(crop.w) * crop.h * 4);
-    for (int y = 0; y < crop.h; ++y) {
-        memcpy(crop.bgra.data() + static_cast<size_t>(y) * crop.w * 4,
-               src.bgra.data() +
-                   (static_cast<size_t>(box.y + y) * src.w + box.x) * 4,
-               static_cast<size_t>(crop.w) * 4);
-    }
-
     constexpr int kImgH = 48;
-    const double aspect = static_cast<double>(crop.w) / (std::max)(1, crop.h);
+    const double aspect = static_cast<double>(box.w) / (std::max)(1, box.h);
     const int naturalW = static_cast<int>(std::ceil(kImgH * aspect));
     // 0 = unconstrained natural width (with an 8192 px memory guard).
     const int maxAllowed =
@@ -541,24 +595,8 @@ bool RecognizeOne(Engine& e, const Img& src, const Box& box, Line* line,
     const int resizedW = (std::max)(1, (std::min)(maxAllowed, naturalW));
     const int targetW = (std::max)(320, resizedW);
 
-    const Img resized = ResizeImg(crop, resizedW, kImgH);
-
-    std::vector<float> input(static_cast<size_t>(3) * kImgH * targetW, 0.0f);
-    for (int y = 0; y < kImgH; ++y) {
-        for (int x = 0; x < resizedW; ++x) {
-            const uint8_t* p =
-                resized.bgra.data() + (static_cast<size_t>(y) * resizedW + x) * 4;
-            const uint8_t blue = p[0];
-            const uint8_t green = p[1];
-            const uint8_t red = p[2];
-
-            const size_t base = static_cast<size_t>(y) * targetW + x;
-            const size_t plane = static_cast<size_t>(kImgH) * targetW;
-            input[base] = (red / 255.0f - 0.5f) / 0.5f;
-            input[plane + base] = (green / 255.0f - 0.5f) / 0.5f;
-            input[2 * plane + base] = (blue / 255.0f - 0.5f) / 0.5f;
-        }
-    }
+    std::vector<float> input;
+    SampleCropBilinear(src, box, resizedW, targetW, kImgH, input);
 
     std::vector<int64_t> outShape;
     std::vector<float> preds;
@@ -576,15 +614,35 @@ bool RecognizeOne(Engine& e, const Img& src, const Box& box, Line* line,
     // The crop was resized to kImgH rows and right-padded to targetW
     // columns; the timeline's T steps span that whole padded input. One
     // step therefore covers (targetW / T) input columns, each of which is
-    // (crop.w / resizedW) source pixels - and the content sits in the first
+    // (box.w / resizedW) source pixels - and the content sits in the first
     // resizedW of those columns. The product maps a timestep straight into
     // source pixels within the crop.
     line->pixelsPerColumn =
-        static_cast<double>(crop.w) * targetW /
+        static_cast<double>(box.w) * targetW /
         (static_cast<double>(resizedW) * static_cast<double>(T));
 
-    int lastId = -1;
+    // CTC decoding with peak activation pooling: track each character run
+    // across timesteps and record the peak probability and peak center column.
+    int currentId = 0;
+    float peakProb = 0.0f;
+    int peakCol = -1;
     double confSum = 0;
+
+    auto emitRun = [&](int id, float prob, int col) {
+        if (id > 0 && id < static_cast<int>(charset.size())) {
+            OcrSelection::CharCol cc;
+            cc.c = charset[id];
+            // Fold full-width forms as they are decoded, so word text,
+            // space detection and the CJK test all see ordinary ASCII.
+            if (cc.c.size() == 1) {
+                cc.c[0] = OcrSelection::FoldFullWidthChar(cc.c[0]);
+            }
+            cc.col = col;
+            line->chars.push_back(std::move(cc));
+            confSum += prob;
+        }
+    };
+
     for (int t = 0; t < T; ++t) {
         const float* row = preds.data() + static_cast<size_t>(t) * C;
         int best = 0;
@@ -595,21 +653,27 @@ bool RecognizeOne(Engine& e, const Img& src, const Box& box, Line* line,
                 best = c;
             }
         }
-        if (best != 0 && best != lastId) {
-            if (best < static_cast<int>(charset.size())) {
-                OcrSelection::CharCol cc;
-                cc.c = charset[best];
-                // Fold full-width forms as they are decoded, so word text,
-                // space detection and the CJK test all see ordinary ASCII.
-                if (cc.c.size() == 1) {
-                    cc.c[0] = OcrSelection::FoldFullWidthChar(cc.c[0]);
-                }
-                cc.col = t;
-                line->chars.push_back(std::move(cc));
+
+        if (best != currentId) {
+            // The previous character run ended. Emit it with its peak probability and peak column.
+            if (currentId != 0) {
+                emitRun(currentId, peakProb, peakCol);
             }
-            confSum += bestP;
+            currentId = best;
+            peakProb = bestP;
+            peakCol = t;
+        } else if (currentId != 0) {
+            // Contiguous same character: update peak activation and column.
+            if (bestP > peakProb) {
+                peakProb = bestP;
+                peakCol = t;
+            }
         }
-        lastId = best;
+    }
+
+    // Flush any pending trailing character run.
+    if (currentId != 0) {
+        emitRun(currentId, peakProb, peakCol);
     }
 
     for (const OcrSelection::CharCol& cc : line->chars) line->text += cc.c;

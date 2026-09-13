@@ -212,6 +212,7 @@ void LoadRecentCaptures(HWND dlg) {
     std::reverse(files.begin(), files.end());
 
     st->suppressPreview = true;
+    st->images.Clear();
     for (const auto& f : files) st->images.AddFile(f);
     st->suppressPreview = false;
 }
@@ -239,7 +240,7 @@ INT_PTR CALLBACK DialogProc(HWND dlg, UINT msg, WPARAM wParam, LPARAM lParam) {
             CheckDlgButton(dlg, IDC_RADIO_PNG, BST_CHECKED);
             CheckDlgButton(dlg,
                            cfg.pdfLayout == PdfLayout::SlicedPages ? IDC_RADIO_SLICE_PAGES
-                                                                   : IDC_RADIO_SLICE_LONG,
+                                                                  : IDC_RADIO_SLICE_LONG,
                            BST_CHECKED);
 
             fresh->canvas = GetDlgItem(dlg, IDC_SLICE_PREVIEW_CANVAS);
@@ -251,12 +252,17 @@ INT_PTR CALLBACK DialogProc(HWND dlg, UINT msg, WPARAM wParam, LPARAM lParam) {
 
             const std::vector<std::wstring>* initial =
                 reinterpret_cast<const std::vector<std::wstring>*>(lParam);
-            if (initial && !initial->empty()) {
+            if (initial && initial->size() > 1) {
                 fresh->suppressPreview = true;
                 for (const auto& f : *initial) fresh->images.AddFile(f);
                 fresh->suppressPreview = false;
             } else {
                 LoadRecentCaptures(dlg);
+                if (fresh->images.Count() == 0 && initial && !initial->empty()) {
+                    fresh->suppressPreview = true;
+                    for (const auto& f : *initial) fresh->images.AddFile(f);
+                    fresh->suppressPreview = false;
+                }
             }
 
             RefreshPreview(dlg);

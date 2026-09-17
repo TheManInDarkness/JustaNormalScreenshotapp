@@ -9,7 +9,7 @@ A lightweight, native Windows screenshot, scrolling capture, and OCR text extrac
 ## Features
 
 ### 📸 Region Capture
-* **Instant snipping** with `Ctrl+Shift+S` (or `Print Screen`).
+* **Instant snipping** with `Ctrl+Shift+S` (or `Print Screen`, but not really recommended).
 * Darkened scrim overlay with interactive selection, drag-to-resize handles, and a floating HUD.
 * Instant action bar to **Copy to Clipboard**, **Save to Disk**, **Extract Text (OCR)**, or dismiss.
 

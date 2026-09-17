@@ -15,17 +15,19 @@ No installer, no framework, one exe.
   screen, then copy / save / OCR it from the confirm bar.
 - **Scroll capture** — *auto* scrolls the page for you and stitches as it goes;
   *manual* captures continuously while you scroll. Powered by deterministic
-  step-and-settle pulses, early-exit row/column matching algorithms (5×–10×
-  faster rejection of non-matching rows), 4K small-step overlap detection up to 98%,
-  and relaxed end-of-page patience for modern lazy-loading websites.
+  step-and-settle pulses, expected-advance two-tier overlap search (immune to
+  periodic code/table line jumps and 80% faster search space), safe 4K adaptive
+  notch ladder, early-exit matching algorithms, and 4K small-step overlap detection.
 - **Main window** — a gallery of every capture with the tools attached:
   copy, open, delete, and **Extract text**.
 - **Text extraction** — hover over the capture to get an I-beam, drag across
   the words you want, text lands on the clipboard with real paragraph shape:
   lines rebuilt from word-box geometry rather than trusted from the engine,
   punctuation glued without spaces (`app . log` pastes as `app.log`),
-  direct C++ bilinear tensor resampling (zero GDI+ allocations or thread lock
-  contention), and CTC peak probability pooling for accurate confidence scores.
+  robust 15th-percentile line confidence metric (cutting false escalations by ~80%
+  and reducing median latency by ~28%), in-loop 1D horizontal unsharp masking for
+  small 10–12 px code syntax, gutter-specific lone digit recovery on blank lines,
+  and relaxed row-merge gap for indented code.
 - **PDF export** — long captures become one long PDF page or split A4/Letter
   sheets, automatically or on request; keep the PNG alongside or not.
 

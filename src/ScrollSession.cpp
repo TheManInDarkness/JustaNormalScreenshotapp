@@ -255,6 +255,7 @@ struct Session {
     DWORD lastProgressTick = 0;
     bool autoStarted = false;
     long long maxRows = 0;        // 0 = no limit (set from AppConfig at session start)
+    int lastAdvanceRows = 0;      // Last measured advance in pixels (used as expected prior)
 
     std::wstring finishKey = L"Enter";
     std::wstring stopKey;         // e.g. "Pause" — empty when no stop hotkey is registered
@@ -270,12 +271,15 @@ Session* g_session = nullptr;
 
 // Subsampled hash, used only to answer "did anything move at all" before
 // paying for a full overlap match.
-uint64_t FastHash(Bitmap* bmp) {
+// `ignoreRightMargin` excludes the rightmost columns (scrollbar area), matching MatchMargin.
+uint64_t FastHash(Bitmap* bmp, int ignoreRightMargin = 0) {
     if (!bmp || bmp->GetLastStatus() != Ok) return 0;
 
     const int w = static_cast<int>(bmp->GetWidth());
     const int h = static_cast<int>(bmp->GetHeight());
     if (w <= 0 || h <= 0) return 0;
+
+    const int activeW = (std::max)(1, w - (std::max)(0, ignoreRightMargin));
 
     BitmapData data;
     Rect rect(0, 0, w, h);
@@ -290,7 +294,7 @@ uint64_t FastHash(Bitmap* bmp) {
     for (int y = 0; y < h; y += 4) {
         const uint8_t* row =
             static_cast<const uint8_t*>(data.Scan0) + static_cast<size_t>(y) * data.Stride;
-        for (int x = 0; x < w; x += 4) {
+        for (int x = 0; x < activeW; x += 4) {
             const uint8_t* px = row + static_cast<size_t>(x) * 4;
             // Top 6 bits per channel: anti-aliasing jitter alone must not
             // read as movement.
@@ -488,7 +492,9 @@ int CaptureStep(Session* s) {
     std::unique_ptr<Bitmap> frame(GrabRegion(s));
     if (!frame) return 0;
 
+    const int width = static_cast<int>(frame->GetWidth());
     const int height = static_cast<int>(frame->GetHeight());
+    const int margin = MatchMargin(s->dpi, width);
 
     if (!s->lastFull) {
         // The copy goes into `strips`; `lastFull` keeps the raw grab. Every
@@ -500,7 +506,7 @@ int CaptureStep(Session* s) {
         std::unique_ptr<Bitmap> first(Utils::CloneBitmap(frame.get()));
         if (!first) return 0;
 
-        s->lastHash = FastHash(frame.get());
+        s->lastHash = FastHash(frame.get(), margin);
         s->totalRows = height;
         s->frameCount = 1;
         s->strips.push_back(std::move(first));
@@ -510,7 +516,8 @@ int CaptureStep(Session* s) {
 
     // Cheap rejection first: while the user is between scrolls this is the
     // common case, and a full overlap search would be wasted.
-    const uint64_t hash = FastHash(frame.get());
+    // Exclude the scrollbar margin so fading overlay scrollbars don't fake movement.
+    const uint64_t hash = FastHash(frame.get(), margin);
     if (hash == s->lastHash) return 0;
 
     stitch::MatchOptions matchOpt = LiveMatchOptions();
@@ -524,6 +531,9 @@ int CaptureStep(Session* s) {
     } else {
         matchOpt.minSearchFraction = 0.02;
         matchOpt.maxSearchFraction = 0.98;
+    }
+    if (s->lastAdvanceRows > 0) {
+        matchOpt.expectedAdvanceRows = s->lastAdvanceRows;
     }
 
     int newRows = 0;
@@ -640,6 +650,9 @@ int CaptureStep(Session* s) {
     s->lastHash = hash;
 
     if (newRows <= 0) return 0;
+
+    // Track the successful scroll advance to guide subsequent frame matching
+    s->lastAdvanceRows = newRows;
 
     std::unique_ptr<Bitmap> strip(Utils::CropBitmap(
         frame.get(), Rect(0, height - newRows, static_cast<INT>(frame->GetWidth()),
@@ -846,12 +859,11 @@ void RebaselineFirstFrame(Session* s) {
     std::unique_ptr<Bitmap> fresh(GrabRegion(s));
     if (!fresh) return;
 
-    // Same split as the first capture: the copy is what gets stitched, the
-    // raw grab is what the next frame is matched against.
+    const int margin = MatchMargin(s->dpi, static_cast<int>(fresh->GetWidth()));
     std::unique_ptr<Bitmap> copy(Utils::CloneBitmap(fresh.get()));
     if (!copy) return;
 
-    s->lastHash = FastHash(fresh.get());
+    s->lastHash = FastHash(fresh.get(), margin);
     s->strips[0] = std::move(copy);
     s->lastFull = std::move(fresh);
 }
@@ -1075,9 +1087,20 @@ void Run(const RECT& region, Mode mode) {
                                     (std::max)(1000, (std::min)(cfg.autoScrollMaxRows, 500000)));
 
         // Scale the pulse to the captured region: smaller regions need smaller pulses
-        // so that each step reveals roughly 20-30% of the viewport, preserving ample overlap.
+        // so that each step reveals roughly 20-25% of the viewport. Capped safely at 5 notches
+        // on 4K screens so smooth-scrolling decelerates completely within kAutoSettleMs (80ms).
         const int regionHeight = session.region.bottom - session.region.top;
-        session.notches = (regionHeight < 500) ? 1 : ((regionHeight < 900) ? 2 : 3);
+        if (regionHeight < 500) {
+            session.notches = 1;
+        } else if (regionHeight < 900) {
+            session.notches = 2;
+        } else if (regionHeight < 1400) {
+            session.notches = 3;  // FHD sweet spot
+        } else if (regionHeight < 2000) {
+            session.notches = 4;  // 1440p (2K)
+        } else {
+            session.notches = 5;  // 2160p (4K) safe cap
+        }
         session.pollMs = kAutoSettleMs;
         session.lastProgressTick = GetTickCount();
         session.autoStarted = true;

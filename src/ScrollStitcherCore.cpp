@@ -8,12 +8,26 @@ namespace {
 
 inline int AbsDiff(int a, int b) { return a > b ? a - b : b - a; }
 
+// Fast perceived luminance: Y = (R + 2*G + B) / 4.
+// Weights green highest, matching human vision and ClearType subpixel geometry.
+// Pixel memory layout is BGRA: p[0]=Blue, p[1]=Green, p[2]=Red.
+inline int PixelLuma(const uint8_t* p) {
+    return (static_cast<int>(p[2]) + (static_cast<int>(p[1]) << 1) + static_cast<int>(p[0])) >> 2;
+}
+
 // Compare two pixels on B/G/R. Alpha is ignored: capture paths produce
 // opaque frames but do not all agree on what they write into the alpha byte.
 inline bool PixelsClose(const uint8_t* p, const uint8_t* q, int tol) {
-    return AbsDiff(p[0], q[0]) <= tol &&
-           AbsDiff(p[1], q[1]) <= tol &&
-           AbsDiff(p[2], q[2]) <= tol;
+    // 1. Direct channel comparison (fast path for solid colors and images)
+    if (AbsDiff(p[0], q[0]) <= tol &&
+        AbsDiff(p[1], q[1]) <= tol &&
+        AbsDiff(p[2], q[2]) <= tol) {
+        return true;
+    }
+    // 2. ClearType subpixel tolerance: Windows subpixel text anti-aliasing can cause
+    // slight red/blue color fringing on glyph edges between fractional scroll phases,
+    // while perceived brightness remains stable.
+    return AbsDiff(PixelLuma(p), PixelLuma(q)) <= tol;
 }
 
 // How much horizontal detail a row carries. A row of flat background scores
@@ -205,78 +219,125 @@ MatchResult FindVerticalOverlap(const StripView& prev,
     int bestK = 0;
     double bestConfidence = 0.0;
 
-    // Walk candidate overlaps largest-first: find the best-fitting alignment.
-    for (int a = 0; a < anchorCount; ++a) {
-        for (int k = maxK; k >= minRows; --k) {
-            if (a > 0 && anchors[a].row >= k) continue;
-            const int probe = (anchors[a].row < k) ? anchors[a].row : (k - 1);
-            if (probe < 0) continue;
-            // Never probe a fallback row that lacks sufficient detail
-            if (probe != anchors[a].row && GetRowDetail(probe) < kAnchorDetailFloor) {
-                continue;
-            }
+    // Evaluates a single candidate overlap k against anchor a.
+    // Returns true if an overwhelming match (>= 98%) is found and accepted.
+    auto testCandidate = [&](int a, int k) -> bool {
+        if (a > 0 && anchors[a].row >= k) return false;
+        const int probe = (anchors[a].row < k) ? anchors[a].row : (k - 1);
+        if (probe < 0) return false;
+        // Never probe a fallback row that lacks sufficient detail
+        if (probe != anchors[a].row && GetRowDetail(probe) < kAnchorDetailFloor) {
+            return false;
+        }
 
-            const int prevAnchorRow = prev.height - k + probe;
-            if (prevAnchorRow < 0 || prevAnchorRow >= prev.height) continue;
+        const int prevAnchorRow = prev.height - k + probe;
+        if (prevAnchorRow < 0 || prevAnchorRow >= prev.height) return false;
 
-            // Quick single-row check on the anchor row before verifying the full seam.
-            if (!RowsMatch(prev, prevAnchorRow, next, probe, opt)) continue;
+        // Quick single-row check on the anchor row before verifying the full seam.
+        if (!RowsMatch(prev, prevAnchorRow, next, probe, opt)) return false;
 
-            const int verifyStep = std::max(1, k / 96);
-            const int totalSamples = (k + verifyStep - 1) / verifyStep;
-            const int minAcceptSamples = static_cast<int>(std::ceil(totalSamples * opt.seamAcceptance));
-            const int maxFailedSamples = totalSamples - minAcceptSamples;
+        const int verifyStep = std::max(1, k / 96);
+        const int totalSamples = (k + verifyStep - 1) / verifyStep;
+        const int minAcceptSamples = static_cast<int>(std::ceil(totalSamples * opt.seamAcceptance));
+        const int maxFailedSamples = totalSamples - minAcceptSamples;
 
-            int sampled = 0, matched = 0, failed = 0;
-            int detailedSampled = 0, detailedMatched = 0;
-            bool candidateValid = true;
+        int sampled = 0, matched = 0, failed = 0;
+        int detailedSampled = 0, detailedMatched = 0;
+        bool candidateValid = true;
 
-            for (int y = 0; y < k; y += verifyStep) {
-                const bool rowMatches =
-                    RowsMatch(prev, prev.height - k + y, next, y, opt);
-                ++sampled;
-                if (rowMatches) {
-                    ++matched;
-                } else {
-                    if (++failed > maxFailedSamples) {
-                        candidateValid = false;
-                        break; // Exceeded maximum allowable row mismatches
-                    }
-                }
-
-                // Track rows with visual detail separately so blank lines and
-                // uniform margins cannot falsely satisfy the acceptance threshold.
-                if (GetRowDetail(y) >= kAnchorDetailFloor) {
-                    ++detailedSampled;
-                    if (rowMatches) ++detailedMatched;
+        for (int y = 0; y < k; y += verifyStep) {
+            const bool rowMatches =
+                RowsMatch(prev, prev.height - k + y, next, y, opt);
+            ++sampled;
+            if (rowMatches) {
+                ++matched;
+            } else {
+                if (++failed > maxFailedSamples) {
+                    candidateValid = false;
+                    break; // Exceeded maximum allowable row mismatches
                 }
             }
-            if (!candidateValid || !sampled) continue;
 
-            const double overallFrac = static_cast<double>(matched) / sampled;
-
-            // If the region has detailed rows, they must meet seamAcceptance.
-            if (detailedSampled > 0) {
-                const double detailedFrac =
-                    static_cast<double>(detailedMatched) / detailedSampled;
-                if (detailedFrac < opt.seamAcceptance) continue;
+            // Track rows with visual detail separately so blank lines and
+            // uniform margins cannot falsely satisfy the acceptance threshold.
+            if (GetRowDetail(y) >= kAnchorDetailFloor) {
+                ++detailedSampled;
+                if (rowMatches) ++detailedMatched;
             }
+        }
+        if (!candidateValid || !sampled) return false;
 
-            if (overallFrac >= opt.seamAcceptance && overallFrac > bestConfidence) {
-                bestK = k;
-                bestConfidence = overallFrac;
+        const double overallFrac = static_cast<double>(matched) / sampled;
 
-                // An overwhelming match (>= 98%) can be taken immediately.
-                if (bestConfidence >= 0.98) {
+        // If the region has detailed rows, they must meet seamAcceptance.
+        if (detailedSampled > 0) {
+            const double detailedFrac =
+                static_cast<double>(detailedMatched) / detailedSampled;
+            if (detailedFrac < opt.seamAcceptance) return false;
+        }
+
+        if (overallFrac >= opt.seamAcceptance && overallFrac > bestConfidence) {
+            bestK = k;
+            bestConfidence = overallFrac;
+
+            // An overwhelming match (>= 98%) can be taken immediately.
+            if (bestConfidence >= 0.98) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    // Calculate Tier 1 localized search window if an expected advance is known.
+    bool hasTier1 = false;
+    int tier1Min = minRows;
+    int tier1Max = maxK;
+    if (opt.expectedAdvanceRows > 0) {
+        const int expectedK = prev.height - opt.expectedAdvanceRows;
+        const int slack = std::max(16, static_cast<int>(prev.height * opt.expectedSlackFraction));
+        const int tMin = std::max(minRows, expectedK - slack);
+        const int tMax = std::min(maxK, expectedK + slack);
+        if (tMax >= tMin) {
+            tier1Min = tMin;
+            tier1Max = tMax;
+            hasTier1 = true;
+        }
+    }
+
+    // Tier 1: Prioritize localized window around expected advance.
+    // Prevents periodic content (code lines, spreadsheet rows) from matching the wrong line pitch.
+    if (hasTier1) {
+        for (int a = 0; a < anchorCount; ++a) {
+            for (int k = tier1Max; k >= tier1Min; --k) {
+                if (testCandidate(a, k)) {
                     result.overlapRows = bestK;
                     result.matched = true;
                     result.confidence = bestConfidence;
                     return result;
                 }
             }
+            if (bestConfidence >= opt.seamAcceptance) {
+                result.overlapRows = bestK;
+                result.matched = true;
+                result.confidence = bestConfidence;
+                return result;
+            }
+        }
+    }
+
+    // Tier 2: Sweep full window as a fallback (skipping candidates already checked in Tier 1).
+    for (int a = 0; a < anchorCount; ++a) {
+        for (int k = maxK; k >= minRows; --k) {
+            if (hasTier1 && k >= tier1Min && k <= tier1Max) continue;
+
+            if (testCandidate(a, k)) {
+                result.overlapRows = bestK;
+                result.matched = true;
+                result.confidence = bestConfidence;
+                return result;
+            }
         }
 
-        // If this anchor found a validated match >= seamAcceptance, accept it.
         if (bestConfidence >= opt.seamAcceptance) {
             result.overlapRows = bestK;
             result.matched = true;

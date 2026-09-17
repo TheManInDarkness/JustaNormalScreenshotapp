@@ -434,10 +434,18 @@ bool Detect(Engine& e, const Img& src, std::vector<Box>* boxes) {
             scoreSum += map[idx];
         }
         const float score = static_cast<float>(scoreSum / px.size());
-        if (score < g_options.detBoxThresh) continue;
 
         const int bw = xmax - xmin + 1;
         const int bh = ymax - ymin + 1;
+
+        // Code gutter numbers (e.g. lone '7' on an empty line) often have very small pixel
+        // areas, so their average DBNet probability in the map may sit between 0.30 and 0.45.
+        // If a compact component is located in the left margin (gutter zone, <15% map width),
+        // we allow it to pass with a slightly more permissive threshold (0.30) to avoid dropped lines.
+        const bool isGutterCandidate = (xmin < mw * 0.15) && (bw <= 20) && (bh <= 35);
+        const float minRequiredScore = isGutterCandidate ? 0.30f : g_options.detBoxThresh;
+        if (score < minRequiredScore) continue;
+
         // Reject on size BEFORE or AFTER the unclip below. PaddleOCR's
         // DBPostProcess.boxes_from_bitmap does it after - it unclips the raw
         // contour and only then drops boxes whose short side is under
@@ -468,14 +476,16 @@ bool Detect(Engine& e, const Img& src, std::vector<Box>* boxes) {
                     src.h)) -
             box.y;
         // The reference's post-unclip gate is min_size + 2 = 5 on the
-        // SHORT side of the expanded box, which is what the 5s below already
-        // express in source-pixel space.
+        // SHORT side of the expanded box. For gutter candidates we allow 3
+        // so single-character line numbers survive.
         if (g_options.detMinSizeAfterUnclip) {
             const int ubw = (std::min)(mw, xmax + d + 1) - (std::max)(0, xmin - d);
             const int ubh = (std::min)(mh, ymax + d + 1) - (std::max)(0, ymin - d);
-            if ((std::min)(ubw, ubh) < 5) continue;
+            const int minSide = isGutterCandidate ? 3 : 5;
+            if ((std::min)(ubw, ubh) < minSide) continue;
         }
-        if (box.w >= 5 && box.h >= 5 && box.x >= 0 && box.y >= 0 &&
+        const int minBoxSide = isGutterCandidate ? 3 : 5;
+        if (box.w >= minBoxSide && box.h >= minBoxSide && box.x >= 0 && box.y >= 0 &&
             box.x + box.w <= src.w && box.y + box.h <= src.h) {
             boxes->push_back(box);
         }
@@ -570,6 +580,32 @@ void SampleCropBilinear(const Img& src, const Box& box, int resizedW, int target
             outTensor[2 * plane + base] = b / 127.5f - 1.0f;
         }
     }
+
+    // For small text lines (height < 22 px, typical for 10-12 px code and UI fonts),
+    // bilinear upsampling to 48 px can soften high-frequency edges (quotes, colons, brackets).
+    // Apply a lightweight 1D horizontal unsharp mask along each row of the planar float tensor.
+    // This sharpens vertical character stems and punctuation without introducing vertical ringing
+    // or allocating any extra memory buffers.
+    if (box.h < 22 && resizedW >= 3) {
+        constexpr float kSharpAlpha = 0.22f;  // Gentle sharpening strength
+        for (size_t c = 0; c < 3; ++c) {
+            float* planeData = outTensor.data() + c * plane;
+            for (int y = 0; y < targetH; ++y) {
+                float* row = planeData + static_cast<size_t>(y) * targetW;
+                float prev = row[0];
+                for (int x = 1; x < resizedW - 1; ++x) {
+                    const float curr = row[x];
+                    const float next = row[x + 1];
+                    // 3-point horizontal Laplacian approximation: curr - 0.5 * (prev + next)
+                    const float laplacian = curr - 0.5f * (prev + next);
+                    const float sharpened = curr + kSharpAlpha * laplacian;
+                    // Clamp to valid SVTR [-1.0, 1.0] range
+                    row[x] = (std::max)(-1.0f, (std::min)(1.0f, sharpened));
+                    prev = curr;
+                }
+            }
+        }
+    }
 }
 
 bool RecognizeOne(Engine& e, const Img& src, const Box& box, Line* line,
@@ -626,7 +662,7 @@ bool RecognizeOne(Engine& e, const Img& src, const Box& box, Line* line,
     int currentId = 0;
     float peakProb = 0.0f;
     int peakCol = -1;
-    double confSum = 0;
+    std::vector<float> charProbs;
 
     auto emitRun = [&](int id, float prob, int col) {
         if (id > 0 && id < static_cast<int>(charset.size())) {
@@ -639,7 +675,7 @@ bool RecognizeOne(Engine& e, const Img& src, const Box& box, Line* line,
             }
             cc.col = col;
             line->chars.push_back(std::move(cc));
-            confSum += prob;
+            charProbs.push_back(prob);
         }
     };
 
@@ -677,8 +713,21 @@ bool RecognizeOne(Engine& e, const Img& src, const Box& box, Line* line,
     }
 
     for (const OcrSelection::CharCol& cc : line->chars) line->text += cc.c;
-    line->conf =
-        line->chars.empty() ? 0.0f : static_cast<float>(confSum / line->chars.size());
+
+    // Line confidence calculation using the robust 15th percentile of character peak probabilities.
+    // An arithmetic mean was fragile: a single noisy dot or quote (e.g. P = 0.35) dragged an otherwise
+    // 99% line below the escalation gate (0.90), triggering expensive model fallbacks.
+    // The 15th percentile ensures only lines with genuine degradation are escalated.
+    if (charProbs.empty()) {
+        line->conf = 0.0f;
+    } else if (charProbs.size() < 4) {
+        // For short lines (e.g. "if ("), a single bad character is significant; use minimum.
+        line->conf = *std::min_element(charProbs.begin(), charProbs.end());
+    } else {
+        std::sort(charProbs.begin(), charProbs.end());
+        const size_t p15Idx = static_cast<size_t>(std::floor(0.15 * charProbs.size()));
+        line->conf = charProbs[p15Idx];
+    }
     return true;
 }
 

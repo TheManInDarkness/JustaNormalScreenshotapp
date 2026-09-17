@@ -67,6 +67,15 @@ struct MatchOptions {
 
     // Rows sampled per row-comparison. 1 = every pixel; larger is faster.
     int columnStep = 2;
+
+    // If expectedAdvanceRows > 0, the search prioritizes a localized window
+    // around the expected overlap (k_expected = prev.height - expectedAdvanceRows)
+    // before falling back to the full range. Prevents periodic content (code, tables)
+    // from matching the wrong line pitch.
+    int expectedAdvanceRows = 0;
+
+    // Search window slack around expectedAdvanceRows (as a fraction of strip height).
+    double expectedSlackFraction = 0.12;
 };
 
 struct MatchResult {

@@ -214,10 +214,11 @@ std::vector<TextRect> MergeRowBoxes(std::vector<TextRect> boxes) {
 
     // Group into rows. A box joins a row when its vertical centre sits within
     // half the shorter of the two heights AND the horizontal gap to the
-    // row's current span stays under about one and a half text heights -
-    // without that gate, two columns of a page fuse into one spanning rect
-    // and recognition reads straight across the gutter.
-    constexpr double kMaxGutterVsHeight = 1.5;
+    // row's current span stays under about 2.5 text heights.
+    // 1.5 was too strict for code screenshots with 4-space or 8-space indentation,
+    // slicing code lines into disjoint fragments. 2.5 accommodates typical indentation
+    // while still stopping true multi-column layouts (which have 4x-10x gutters) from fusing.
+    constexpr double kMaxGutterVsHeight = 2.5;
 
     std::sort(boxes.begin(), boxes.end(), [](const TextRect& a, const TextRect& b) {
         const int ca = a.y + a.height / 2;
